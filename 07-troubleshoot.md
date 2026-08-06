@@ -14,8 +14,7 @@ This checklist condenses all the non-obvious gotchas that cause the most install
 
 ```
 PRE-FLIGHT
-  [ ] License file in hand — LICENSE_ID extracted and tested
-  [ ] IBM Support has enabled airgap on license (if air-gap install)
+  [ ] IBMid registered and IBM entitlement key copied from IBM Container Library
   [ ] Kubernetes: version 1.21.0+ confirmed. NOT 1.35.0–1.35.3 (MaxUnavailableStatefulSet bug)
   [ ] Helm: version 3.14.0–3.18.0 ONLY. Run: helm version --short
   [ ] cert-manager: installed + all 3 pods Running. --enable-certificate-owner-ref=true set
@@ -24,13 +23,15 @@ PRE-FLIGHT
   [ ] Database nodes: labeled mission-control.datastax.com/role=database (at least 3 prod)
   [ ] Two SEPARATE object storage buckets exist (one Mimir metrics, one Loki logs — CANNOT share)
   [ ] StorageClass with volumeBindingMode: WaitForFirstConsumer exists and named correctly
-  [ ] EKS: gp2 (or equivalent) set as default StorageClass before KOTS install
+  [ ] EKS: gp2 (or equivalent) set as default StorageClass before install
+  [ ] cp.icr.io image pull secret created in the operator namespace (username `cp`, password = entitlement key)
   [ ] Release name chosen — does NOT contain "mission-control"
   [ ] For multi-region: same release name planned for CP and all DPs
   [ ] Ports open: 7000, 7001, 8080, 9042, 30880, 30600 between nodes/clusters
+  [ ] If migrating from Replicated/KOTS: maintenance window scheduled (cass-operator restart triggers rolling DB pod restarts)
 
 INSTALLATION
-  [ ] KOTS v1.9.0+: Admin user password SET in config before clicking Deploy (preflight fails without it)
+  [ ] overrides.yaml configures Loki storage (or disables it) and Dex with an auth connector — bare install fails validation
   [ ] Data plane Vector aggregator URL is set and reachable from DP before install
   [ ] For OpenShift: SCC grants applied to all 9 service accounts BEFORE helm install
   [ ] For OpenShift: dnsNamespace: openshift-dns + Mimir nginx resolver set (silent failure without it)
@@ -126,10 +127,11 @@ kubectl top node
 | Symptom | Root cause | Fix |
 |---------|-----------|-----|
 | Pods stuck `Pending` forever | No `platform`-labeled node exists, or node lacks resources | `kubectl describe pod` → check Events; verify node labels |
-| Preflight fails at "password" step | Admin password not set (required since v1.9.0) | Set password in KOTS config before deploying |
+| `ImagePullBackOff` on entitled images (hcd, dse, cql-router, cqlsh) | Pull secret missing, wrong namespace, or bad entitlement key | Verify secret exists in `$MC_NAMESPACE`, decode and check credentials — see `02-install-online.md` Step C |
+| `helm install` fails: "no connectors specified" | Dex has no auth connector configured | Add at least `enablePasswordDB: true` + a static password to `overrides.yaml` |
 | `helm install` naming conflict error | Release name contains `mission-control` | Rename to `mc-release`, `mc-prod`, etc. |
 | Loki/Mimir silently stop collecting on OCP | Missing `dnsNamespace: openshift-dns` + Mimir nginx resolver | Add OCP DNS config to `values.yaml` — see `04-cloud-config.md` |
-| KOTS registry screen doesn't appear on airgap | License doesn't have airgap entitlement | Contact IBM Support to enable airgap on the license |
+| Authentication failure pulling from `cp.icr.io` | Username isn't exactly `cp`, or entitlement key has whitespace/expired | Regenerate key at IBM Container Library; recreate the secret |
 | `WaitForFirstConsumer` not set on StorageClass | Volumes bind on wrong node → deadlock | Create a new StorageClass with `volumeBindingMode: WaitForFirstConsumer` |
 | Data plane aggregator crashes (OOM) | No valid sink configured; buffers logs/metrics forever | Set `aggregator.customConfig.sinks.control_plane_aggregator.address` to reachable CP URL |
 | OIDC login redirects to wrong URL | `ui.baseUrl` missing or mismatched | Set `ui.baseUrl` to exactly match the Ingress hostname |
@@ -141,7 +143,8 @@ kubectl top node
 | Helm 3.19+ fails | Not yet supported | Downgrade to Helm 3.18.x |
 | Air-gap: image pull errors | Image not mirrored to private registry, or wrong tag | Verify all required images are in registry; check tags match release notes |
 | OCP: pods remain after `helm uninstall` | SCC grants not removed first | Remove SCC grants before uninstalling (see Section 7 below) |
-| EKS KOTS preflight fails on StorageClass | No default StorageClass set | Patch gp2 as default before KOTS install |
+| EKS install stalls on PVC provisioning | No default StorageClass set | Patch gp2 as default before install |
+| Post-migration: DB pods still on old images | `cass-operator` not restarted after Replicated→ICR migration | Restart `cass-operator` deployment, see `02-install-online.md` migration section |
 | `NotEnoughSpaceToScaleDown` on DC scale-down | Remaining nodes lack disk for decommissioned data | Add more storage or reduce to fewer nodes in stages |
 | Scale-up/down fails or is rejected | Size not a multiple of rack count | Always change size in multiples of rack count (e.g., 3, 6, 9 for a 3-rack DC) |
 | MC blocks DC deletion | User keyspaces still reference the DC | `ALTER KEYSPACE` to remove the DC from replication first |
@@ -247,8 +250,7 @@ kubectl support-bundle https://kots.io
 ### Air-gapped (no internet)
 ```bash
 # On an internet-connected machine: download the spec
-curl -o support-bundle-spec.yaml https://kots.io \
-  -H 'User-agent:Replicated_Troubleshoot/v1beta1'
+curl -o support-bundle-spec.yaml https://kots.io
 
 # Copy support-bundle-spec.yaml to the air-gapped server, then:
 kubectl support-bundle ./support-bundle-spec.yaml
@@ -327,13 +329,7 @@ kubectl delete crd clusterconfigs.datastax.com
 kubectl delete -f mission-control-cluster-resources.yaml --namespace mission-control
 ```
 
-### KOTS uninstall
-
-```bash
-kubectl kots remove mission-control -n mission-control --undeploy
-kubectl delete clusterrole kotsadm-role
-kubectl delete clusterrolebinding kotsadm-rolebinding
-```
+> If this cluster still has a leftover KOTS admin console from a pre-migration Replicated install that was never cleaned up, remove it directly with `kubectl` (not `kubectl kots remove`) — see the "Remove KOTS" step in `02-install-online.md`'s migration section.
 
 ### OpenShift: REMOVE SCC GRANTS FIRST (critical)
 
@@ -379,13 +375,6 @@ kubectl exec -it deploy/mc-release-mission-control -n mission-control -- \
 
 📖 Source: https://docs.datastax.com/en/mission-control/frequently-asked-questions/faq.html
 
-### Via KOTS
-
-```bash
-kubectl kots admin-console -n mission-control
-# Navigate to: Authentication → Static Credentials → update Password Hash
-```
-
 ### Via Helm (update values.yaml)
 
 ```bash
@@ -394,7 +383,8 @@ echo NEW_PASSWORD | htpasswd -BinC 10 admin | cut -d: -f2
 
 # Update the hash in your values.yaml under dex.config.staticPasswords[0].hash
 # Then apply:
-helm upgrade mc-release oci://registry.replicated.com/mission-control/mission-control \
+helm upgrade mc-release oci://icr.io/mission-control-helm/mission-control \
+  --version $MC_VERSION \
   --namespace mission-control -f values.yaml
 
 # Restart Dex to apply the new password immediately
@@ -410,7 +400,7 @@ kubectl rollout restart deployment -n mission-control -l app.kubernetes.io/name=
 - Open support tickets: https://www.ibm.com/mysupport
 - Only accounts with paid HCD or DSE plans can submit support tickets
 - Always attach a support bundle (see Section 5 above) with every ticket
-- For license replacement, airgap enablement, or Public Preview conversion: contact your IBM account team
+- For entitlement key issues, replacement, or Public Preview conversion: contact your IBM account team, or visit https://myibm.ibm.com/products-services/containerlibrary
 
 ---
 

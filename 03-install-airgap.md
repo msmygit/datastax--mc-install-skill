@@ -2,120 +2,83 @@
 
 This file covers fully offline (air-gapped) installations where the target cluster has **no internet access**.
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc.html (Airgapped section)  
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html (Air-gap Helm section)  
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html (Airgap Helm section)
 📖 Source: https://docs.datastax.com/en/mission-control/administration/manage-containers.html
+
+> ⚠️ **Replicated is no longer supported.** There is no more airgap bundle download from `replicated.app` and no more `kubectl kots admin-console push-images`. Air-gapped installs now mirror images directly from `icr.io` / `cp.icr.io` to your private registry with **Skopeo**, then install with Helm using registry-override values. If migrating an existing air-gapped Replicated/KOTS install, see the migration section in `02-install-online.md` — the same ICR image-redirect overrides apply, just sourced from your private registry instead of `icr.io` directly.
 
 ---
 
-## Overview: two distinct phases
+## Overview: two phases
 
 **Phase 1 — On an internet-connected machine:**
-1. Obtain airgap-enabled license from IBM Support
-2. Download the MC airgap bundle
-3. Mirror all container images to your private registry
+1. Obtain your IBM entitlement key
+2. Mirror all required container images from `icr.io`/`cp.icr.io` (and other public registries) to your private registry with Skopeo
+3. Mirror the Mission Control Helm chart itself (OCI artifact) to your private registry, or keep pulling it from `icr.io` if your air-gapped cluster has outbound access to `icr.io` specifically
 
 **Phase 2 — On the air-gapped cluster:**
 4. Install cert-manager from mirrored images
-5. Install MC via KOTS (using the airgap bundle) or Helm (using an all-overrides `values.yaml`)
+5. Create image pull secrets for your private registry
+6. Install MC via Helm using an all-overrides `values-airgap.yaml`
 
 ---
 
-## Phase 1A — License check
+## Phase 1A — Entitlement key
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
 
-> ⚠️ The airgap entitlement must be **explicitly activated** on your license by IBM Support.  
-> Symptom of missing entitlement: During KOTS install the registry screen does not appear. Contact IBM Support to enable airgap on your license.
-
----
-
-## Phase 1B — Download the Airgap Bundle
-
-Run this on a machine with internet access:
-
-```bash
-# Download the airgap bundle (~6 GB or more — ensure disk space)
-curl -f "https://replicated.app/embedded/mission-control/stable?airgap=true" \
-  -H "Authorization: YOUR_LICENSE_ID" \
-  -o mission-control-stable.tgz
-
-# The bundle contains:
-#   mission-control          MC installer binary
-#   license.yaml             Your license file
-#   mission-control.airgap   The image + config bundle
-```
-
-To download a specific version:
-```bash
-curl -f "https://replicated.app/embedded/mission-control/stable/v1.19.1?airgap=true" \
-  -H "Authorization: YOUR_LICENSE_ID" \
-  -o mission-control-v1.19.1.tgz
-```
-
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc.html
+Get your IBM entitlement key from https://myibm.ibm.com/products-services/containerlibrary — sign in with an IBMid, click **Get entitlement key** (or **Copy key**). This key authenticates against `cp.icr.io` when mirroring entitled images.
 
 ---
 
-## Phase 1C — Mirror Images to Your Private Registry
-
-You have two options: **KOTS CLI bulk push** (easier) or **Skopeo** (per-image, granular control).
-
-### Option 1: KOTS CLI bulk push (recommended for KOTS installs)
-
-```bash
-# Extract just the airgap bundle
-tar xvzf mission-control-stable.tgz mission-control.airgap
-
-# Push all images from the bundle to your private registry at once
-kubectl kots admin-console push-images \
-  ./mission-control.airgap \
-  YOUR_REGISTRY/YOUR_NAMESPACE \
-  --registry-username REGISTRY_USER \
-  --registry-password REGISTRY_PASSWORD
-```
-
-📖 Source: https://docs.datastax.com/en/mission-control/administration/manage-containers.html
-
-### Option 2: Skopeo (recommended for Helm installs — precise per-image control)
+## Phase 1B — Mirror images with Skopeo
 
 📖 Source: https://docs.datastax.com/en/mission-control/administration/manage-containers.html
 
 ```bash
 # Install Skopeo (package manager or: https://github.com/containers/skopeo)
 
+# Log in to the source registry for entitled images
+skopeo login cp.icr.io --username cp --password YOUR_ENTITLEMENT_KEY
+
 # Log in to your private registry
 skopeo login YOUR_PRIVATE_REGISTRY
 
-# Copy each required image (repeat for all images listed below)
+# Copy each required image (repeat for all images below, per your MC version)
 skopeo copy \
-  docker://docker.io/datastax/mission-control:v1.19.1 \
-  docker://YOUR_REGISTRY/YOUR_NS/mission-control:v1.19.1
+  docker://icr.io/datastax-mission-control/mission-control:v1.20.1 \
+  docker://YOUR_REGISTRY/YOUR_NS/mission-control:v1.20.1
 
 # Verify a copy succeeded
-skopeo inspect docker://YOUR_REGISTRY/YOUR_NS/mission-control:v1.19.1
+skopeo inspect docker://YOUR_REGISTRY/YOUR_NS/mission-control:v1.20.1
 ```
 
-### Core images to mirror (update tags per your MC version from release notes)
+### Images to mirror (update tags per your MC version from release notes)
 
 📖 Release notes with exact image tags: https://docs.datastax.com/en/mission-control/release-notes/release-notes.html
+📖 Full tag/registry list: https://docs.datastax.com/en/mission-control/administration/manage-containers.html
 
 ```
-# Mission Control platform
-docker.io/datastax/mission-control:<version>
-docker.io/datastax/mission-control-ui:<version>
-docker.io/datastax/mission-control-dex:<version>
+# Mission Control platform (public — no entitlement key needed)
+icr.io/datastax-mission-control/mission-control:<version>
+icr.io/datastax-mission-control/mission-control-ui:<version>
+icr.io/datastax-mission-control/mission-control-dex:<version>
+icr.io/datastax-mission-control/k8ssandra-client:<version>
+
+# Entitled images — pulled from cp.icr.io, requires entitlement key
+cp.icr.io/cp/ibm-ds-mission-control/hcd:<version>              # HCD
+cp.icr.io/cp/ibm-ds-mission-control/dse-mgmtapi:<version>      # DSE
+cp.icr.io/cp/ibm-ds-mission-control/cql-router:<version>
+cp.icr.io/cp/ibm-ds-mission-control/cqlsh-pod:<version>
 
 # Operators
 cr.k8ssandra.io/k8ssandra/k8ssandra-operator:<version>
 docker.io/k8ssandra/cass-operator:<version>
-docker.io/k8ssandra/k8ssandra-client:<version>
 
-# Database management APIs
+# Other database management APIs (non-entitled OSS/DSE 6.8/6.9 paths)
 docker.io/k8ssandra/cass-management-api:<version>-ubi   # Cassandra 4.0, 4.1, 5.0
 docker.io/datastax/dse-mgmtapi-6_8:<version>-ubi        # DSE 6.8
 docker.io/datastax/dse-mgmtapi-6_9:<version>-ubi        # DSE 6.9
-# HCD images are from proxy.replicated.com — contact IBM Support for access
 
 # Observability
 docker.io/grafana/grafana:<version>
@@ -133,66 +96,43 @@ docker.io/thelastpickle/cassandra-reaper:<version>
 # Utility images
 docker.io/k8ssandra/system-logger:<version>
 docker.io/datastax/cass-config-builder:<version>
-docker.io/stargateio/data-api:<version>
 
 # Object storage (if using local MinIO for testing)
 quay.io/minio/minio:<version>
 quay.io/minio/mc:<version>
-
-# Replicated SDK (set replicated.enabled: false in air-gap Helm values)
-docker.io/replicated/replicated-sdk:<version>
 ```
 
-> **Always check the exact image list and tags** for your specific MC version in the release notes:  
+> **Always check the exact image list and tags** for your specific MC version in the release notes:
 > 📖 https://docs.datastax.com/en/mission-control/release-notes/release-notes.html
 
+> The `cqlsh-pod` image backing the in-UI CQL console is not open source and is not available on Docker Hub — it is only obtainable from `cp.icr.io` with your entitlement key.
+
 ---
 
-## Phase 2A — KOTS Air-Gap Install
+## Phase 1C — Mirror the Helm chart (optional)
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc.html
+If the air-gapped cluster has no route to `icr.io` at all, pull and repackage the chart, or push it into your private OCI-compatible registry:
 
 ```bash
-# Push KOTS admin images first (do this on the air-gapped machine, using the kotsadm.tar.gz bundle)
-kubectl kots admin-console push-images ./kotsadm.tar.gz YOUR_REGISTRY \
-  --registry-username RW_USER \
-  --registry-password RW_PASS
-
-# Install KOTS pointing to your private registry
-kubectl kots install mission-control \
-  --namespace mission-control \
-  --kotsadm-registry YOUR_REGISTRY \
-  --kotsadm-namespace YOUR_NAMESPACE \
-  --registry-username RO_USER \
-  --registry-password RO_PASS
-
-# Forward the admin console
-kubectl kots admin-console -n mission-control
-# Open: http://localhost:8800
+helm pull oci://icr.io/mission-control-helm/mission-control --version $MC_VERSION
+# Extract, then push to your private OCI registry if it supports OCI artifacts, e.g.:
+# helm push mission-control-<version>.tgz oci://YOUR_REGISTRY/YOUR_NS
 ```
 
-### In the KOTS web UI (air-gap specific steps)
-
-1. Upload your `license.yaml`
-2. The **registry credentials screen appears** (proof your license has airgap) — enter your registry hostname and credentials
-3. Upload `mission-control.airgap` bundle — KOTS loads images from the bundle into your registry
-4. Set **admin user + password** (required since v1.9.0)
-5. Set **Deployment Mode**: Control Plane or Data Plane
-6. Configure observability storage (two separate buckets)
-7. Run preflight checks → Deploy
+If the cluster can reach `icr.io` (but not the entitled `cp.icr.io` image content, or other public registries), you can `helm install`/`helm upgrade` directly from `oci://icr.io/mission-control-helm/mission-control` and only override the image coordinates below.
 
 ---
 
-## Phase 2B — Helm Air-Gap Install
+## Phase 2 — Helm Air-Gap Install
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
 📖 Source: https://docs.datastax.com/en/mission-control/administration/manage-containers.html
 
 Create a `values-airgap.yaml` that overrides every image coordinate to point to your private registry.
 
 ### Image override strategies (choose one)
 
-**Strategy A — Global override (v1.15.0+, recommended):**  
+**Strategy A — Global override (v1.15.0+, recommended):**
 Sets `global.imageConfig.overrides.registry` to redirect all images at once.
 
 ```yaml
@@ -233,7 +173,7 @@ disableCertManagerCheck: true
 image:
   registry: YOUR_REGISTRY:PORT
   repository: YOUR_NS/mission-control
-  tag: v1.19.1
+  tag: v1.20.1
   pullPolicy: IfNotPresent
 
 # Legacy image config (pre-1.15 or when you need per-component control)
@@ -268,7 +208,7 @@ ui:
   image:
     registry: YOUR_REGISTRY:PORT
     repository: YOUR_NS/mission-control-ui
-    tag: v1.19.1
+    tag: v1.20.1
 
 # Dex
 dex:
@@ -296,12 +236,18 @@ k8ssandra-operator:
 
 # Observability
 grafana:
+  enabled: true
   imageRegistry: YOUR_REGISTRY:PORT
   image:
     repository: YOUR_REGISTRY:PORT/YOUR_NS/grafana
   sidecar:
     image:
       repository: YOUR_REGISTRY:PORT/YOUR_NS/k8s-sidecar
+  downloadDashboardsImage:
+    repository: YOUR_REGISTRY:PORT/YOUR_NS/curl
+  initChownData:
+    image:
+      repository: YOUR_REGISTRY:PORT/YOUR_NS
 
 loki:
   global:
@@ -338,17 +284,15 @@ kube-state-metrics:
   image:
     registry: YOUR_REGISTRY:PORT
 
-# Disable Replicated SDK in air-gap mode
+# Replicated SDK no longer applies — omit the `replicated` key entirely, or set:
 replicated:
   enabled: false
-  images:
-    replicated-sdk: YOUR_REGISTRY:PORT/YOUR_NS/replicated-sdk:1.8.0
 ```
 
 ### Create image pull secret and install
 
 ```bash
-# Create the pull secret
+# Create the pull secret for your private registry
 kubectl create namespace mission-control
 kubectl create secret docker-registry mc-pull-secret \
   --namespace mission-control \
@@ -358,18 +302,22 @@ kubectl create secret docker-registry mc-pull-secret \
 
 # Dry-run first to validate all image references
 helm install mc-release \
-  oci://YOUR_REGISTRY:PORT/mission-control/mission-control \
+  oci://icr.io/mission-control-helm/mission-control \
+  --version $MC_VERSION \
   --namespace mission-control \
   --dry-run --debug \
   -f values-airgap.yaml 2>&1 | grep "image:"
 
-# Install
+# Install (swap the OCI source for your mirrored chart registry if the cluster
+# cannot reach icr.io at all — see Phase 1C)
 helm install mc-release \
-  oci://YOUR_REGISTRY:PORT/mission-control/mission-control \
+  oci://icr.io/mission-control-helm/mission-control \
+  --version $MC_VERSION \
   --namespace mission-control \
   -f values-airgap.yaml
 
-# Verify all images pull from your registry (none should reference docker.io or replicated.com)
+# Verify all images pull from your private registry (none should reference
+# docker.io, icr.io, or cp.icr.io directly)
 kubectl get deployments -n mission-control \
   -o jsonpath='{range .items[*]}{.spec.template.spec.containers[*].image}{"\n"}{end}'
 ```
@@ -391,7 +339,7 @@ kubectl get deployments -n mission-control \
 kubectl get events -n mission-control | grep -i "pull\|image\|auth"
 
 # Test a registry connection from within the cluster
-kubectl run test-pull --image=YOUR_REGISTRY:PORT/YOUR_NS/mission-control:v1.19.1 \
+kubectl run test-pull --image=YOUR_REGISTRY:PORT/YOUR_NS/mission-control:v1.20.1 \
   --restart=Never --command -- echo ok
 kubectl describe pod test-pull
 kubectl delete pod test-pull
@@ -402,19 +350,19 @@ Common issues:
 - **Missing namespace**: All image paths must include the registry namespace in air-gap environments
 - **Version skew**: Image tags must exactly match the expected versions for the MC release
 - **Missing pull secret**: Ensure `mc-pull-secret` exists in every namespace where pods are scheduled
+- **`cqlsh-pod` image missing**: This image is not open source and only available from `cp.icr.io` with the entitlement key — mirror it explicitly, it will not appear in generic Docker Hub scans
 
 ---
 
-## Air-gap Support Bundle
+## Air-Gap Support Bundle
 
-When internet access is unavailable, generate a support bundle from a previously downloaded spec:
+Generate a support bundle for troubleshooting when internet access is unavailable:
 
 ```bash
-# On an internet-connected machine first:
-curl -o support-bundle-spec.yaml https://kots.io \
-  -H 'User-agent:Replicated_Troubleshoot/v1beta1'
+# On an internet-connected machine first: download the spec
+curl -o support-bundle-spec.yaml https://kots.io
 
-# Copy support-bundle-spec.yaml to air-gapped server, then:
+# Copy support-bundle-spec.yaml to the air-gapped server, then:
 kubectl support-bundle ./support-bundle-spec.yaml
 ```
 
@@ -427,3 +375,4 @@ kubectl support-bundle ./support-bundle-spec.yaml
 - Cloud-specific storage and ingress values → `04-cloud-config.md`
 - TLS and auth → `05-security.md`
 - Deploy HCD/DSE cluster → `06-cluster-ops.md`
+- Migrating an existing air-gapped Replicated/KOTS install → `02-install-online.md` (Migrate an existing Replicated installation to ICR)

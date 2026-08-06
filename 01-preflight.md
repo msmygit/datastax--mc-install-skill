@@ -1,31 +1,37 @@
-# 01 — Pre-Flight: License, Hardware, Software, Node Labels, Networking & Storage
+# 01 — Pre-Flight: Entitlement, Hardware, Software, Node Labels, Networking & Storage
 
-Every item in this file must be verified **before** running `helm install` or `kubectl kots install`.
+Every item in this file must be verified **before** running `helm install`.
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/installation-requirements.html  
 📖 Source: https://docs.datastax.com/en/mission-control/install/kubernetes.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html  
 📖 Source: https://docs.datastax.com/en/mission-control/misc/supported-platforms.html
+
+> ⚠️ Replicated/KOTS is no longer a supported install method (deprecated 1.20.1, removed thereafter). All installs — online and air-gapped — use Helm from the IBM Container Registry (ICR). Existing Replicated installs migrate in place; see `02-install-online.md`.  
+> 📖 https://docs.datastax.com/en/mission-control/install/migrate-replicated-to-icr.html
 
 ---
 
-## 1. License Acquisition (Mandatory for All Install Paths)
+## 1. IBM Entitlement Key (Mandatory for All Install Paths)
 
-A valid license is required before any installation can proceed.
+A valid IBM entitlement key is required before any installation can proceed. Unlike the old Replicated `LICENSE_ID`, the entitlement key is tied to your IBMid, not a license file.
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
 
-### Paid HCD/DSE subscribers
-- Contact your IBM account team or open a ticket at https://www.ibm.com/mysupport
-- Your license file contains a `LICENSE_ID` — this value is used as **both** the Helm registry username **and** password when logging in to `registry.replicated.com`
-- For a replacement file, or to convert a Public Preview license to a stable channel, contact your account team
+### Obtain an IBMid and entitlement key
+- Go to https://myibm.ibm.com/products-services/containerlibrary (IBM Container Library)
+- Sign in with an IBMid (contact your IBM account team or open a ticket at https://www.ibm.com/mysupport if you don't have one)
+- Click **Get entitlement key** (or **Copy key** if one already exists)
+- The entitlement key is used as the **password** for the `cp.icr.io` image pull secret; the username is always the fixed value `cp`
 
 ### Evaluators / Public Preview
 - A "Public Preview" license is available — contact your IBM account team or DataStax sales
 - Running OSS Cassandra nodes **in addition to** HCD/DSE nodes carries an additional cost; HCD/DSE nodes themselves are included in the license
 
-### Air-gapped license
-- The airgap entitlement must be **explicitly enabled** by IBM Support on your license
-- Symptom: during KOTS install, if the registry credentials screen does not appear, your license does not have airgap activated — contact IBM Support to enable it
+### Air-gapped entitlement
+- The same IBM entitlement key is used for air-gapped installs — it authenticates against `cp.icr.io` when you mirror entitled images (`hcd`, `dse-mgmtapi`, `cql-router`, `cqlsh-pod`) to your private registry with Skopeo
+- Regenerate the key at https://myibm.ibm.com/products-services/containerlibrary if it has expired or you receive container authorization errors
+- Public MC images (`mission-control`, `mission-control-ui`, `mission-control-dex`, `k8ssandra-client`) are served from the non-entitled `icr.io` registry and do **not** require the entitlement key
 
 ---
 
@@ -37,9 +43,8 @@ A valid license is required before any installation can proceed.
 |-----------|----------|-------|
 | Kubernetes | **1.21.0+** | **Avoid 1.35.0–1.35.3**: `MaxUnavailableStatefulSet` feature flag causes StatefulSet failures |
 | OpenShift | **4.8+** | Uses `oc` CLI; cert-manager installed from OperatorHub, not Helm |
-| Helm | **3.14.0–3.18.0** | This range is strict. Verify: `helm version --short`. 3.19+ is NOT supported. |
-| kubectl | 1.21+ | Required for both Helm and KOTS paths |
-| KOTS CLI | 1.105+ | Required for KOTS installs only |
+| Helm | **3.14.0–3.18.0** | This range is strict. Verify: `helm version --short`. 3.19+ is NOT supported. Must support OCI registries (built in since Helm 3.8). |
+| kubectl | 1.21+ | Required for install and all day-2 operations |
 | cert-manager | 1.16.1 (recommended) | Must be installed **before** MC |
 
 ### Verify Helm version before proceeding
@@ -64,8 +69,7 @@ helm version --short
 | Storage | 1 TB per node |
 | Node label | `mission-control.datastax.com/role=platform` |
 
-> **Tip:** For KOTS installs, MC automatically schedules platform services on `platform`-labeled nodes.  
-> For Helm installs, configure `nodeSelector` in `values.yaml` to match this label.  
+> **Tip:** Configure `nodeSelector` in `values.yaml` to match this label so MC platform services (UI, API, observability, operators) schedule on `platform`-labeled nodes.  
 > The `allowOperatorsOnDatabaseNodes: false` default means operator pods (like Reaper) also require the platform label unless you set it to `true`.
 
 ### Database nodes (host HCD/DSE/Cassandra pods)
@@ -188,12 +192,12 @@ allowVolumeExpansion: true
 
 | Cloud | Recommended class | Notes |
 |-------|------------------|-------|
-| EKS | `gp3` (custom class) | **EKS requires a default StorageClass** set before KOTS install — patch gp2 as default if not already done |
+| EKS | `gp3` (custom class) | **EKS requires a default StorageClass** — patch gp2 as default if not already done |
 | AKS | `managed-premium` or `managed-csi-premium` | |
 | GKE | `premium-rwo` (or custom `premium-rwo-retain`) | |
 | OpenShift | `thin-csi`, `ocs-storagecluster-ceph-rbd` | Depends on OCP storage operator |
 
-### EKS: set a default StorageClass before KOTS install
+### EKS: set a default StorageClass before install
 ```bash
 kubectl patch storageclass gp2 \
   -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
@@ -209,7 +213,7 @@ The account performing the installation must be able to:
 - Create and manage cluster-scoped resources (CRDs, ClusterRoles, ClusterRoleBindings)
 - Create namespaces
 - Manage PersistentVolumes and StorageClasses
-- For KOTS: full cluster-admin is typically required
+- Full cluster-admin is typically required for a first install (see `install-mc-helm-separate-cluster-resources` for splitting cluster-scoped resources from app-team installs)
 
 For least-privilege Helm upgrades (app team, no cluster-admin), see:  
 📖 https://docs.datastax.com/en/mission-control/administration/mc/helm-upgrade-rbac.html
@@ -220,8 +224,7 @@ For least-privilege Helm upgrades (app team, no cluster-admin), see:
 
 Run through every item before proceeding to installation:
 
-- [ ] License file in hand — `LICENSE_ID` extracted
-- [ ] For air-gap: IBM Support has enabled airgap entitlement on the license
+- [ ] IBMid registered and IBM entitlement key copied from https://myibm.ibm.com/products-services/containerlibrary
 - [ ] Kubernetes version confirmed: 1.21.0+ and NOT 1.35.0–1.35.3
 - [ ] Helm version confirmed: 3.14.0–3.18.0
 - [ ] cert-manager planned (Helm chart for standard K8s; OperatorHub for OCP)

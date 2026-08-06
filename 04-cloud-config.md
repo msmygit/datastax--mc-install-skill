@@ -58,7 +58,7 @@ Without this, OIDC redirects fail because the redirect URI won't match.
 
 ### EKS prerequisites
 ```bash
-# 1. Set default StorageClass (required for KOTS; recommended for Helm)
+# 1. Set default StorageClass (recommended for Helm)
 kubectl patch storageclass gp2 \
   -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 

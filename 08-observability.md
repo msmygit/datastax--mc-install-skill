@@ -336,7 +336,8 @@ loki:
 
 ```bash
 helm upgrade mc-release \
-  oci://registry.replicated.com/mission-control/mission-control \
+  oci://icr.io/mission-control-helm/mission-control \
+  --version $MC_VERSION \
   --namespace mission-control \
   -f values.yaml \
   -f values-enterprise.yaml

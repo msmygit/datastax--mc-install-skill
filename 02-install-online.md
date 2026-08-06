@@ -1,14 +1,17 @@
-# 02 — Online Installation: cert-manager, Helm, KOTS, OpenShift, Separate Cluster Resources
+# 02 — Online Installation: cert-manager, Helm (ICR), OpenShift, Separate Cluster Resources, Migrating from Replicated
 
-This file covers all **online** (internet-connected) installation paths.  
-For air-gapped installs, see `03-install-airgap.md`.  
+This file covers all **online** (internet-connected) installation paths.
+For air-gapped installs, see `03-install-airgap.md`.
 For cloud-specific `values.yaml` content (EKS/AKS/GKE/OCP), see `04-cloud-config.md`.
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/choose-an-installation-method.html  
-📖 Source: https://docs.datastax.com/en/mission-control/install/kubernetes.html  
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html  
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/choose-an-installation-method.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/kubernetes.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-openshift.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm-separate-cluster-resources.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/migrate-replicated-to-icr.html
+
+> ⚠️ **Replicated (KOTS) is no longer supported.** As of Mission Control 1.20.1, Replicated is deprecated, and KOTS support was removed entirely in later versions. Helm from the IBM Container Registry (ICR) is the only supported install method. If the user has an existing Replicated/KOTS install, go straight to [Migrate an existing Replicated installation to ICR](#migrate-an-existing-replicated-installation-to-icr) below — do **not** reinstall from scratch.
 
 ---
 
@@ -17,7 +20,6 @@ For cloud-specific `values.yaml` content (EKS/AKS/GKE/OCP), see `04-cloud-config
 | Method | Best for | Pros | Cons |
 |--------|----------|------|------|
 | **Helm** (recommended) | GitOps, CI/CD, fine-grained control | Version-controlled config, CLI-managed, GitOps-friendly | Requires Helm knowledge |
-| **KOTS** | Guided setup, automated upgrades via UI | Web UI, guided wizard, auto-upgrade | Less customizable, web interface required |
 | **Helm + separate cluster resources** | Multi-team: cluster-admin and app team separated | Cluster-scoped resources managed independently | More complex coordination |
 | **OpenShift** | OCP environments | Native OCP security, Routes auto-created | OCP-specific knowledge required |
 
@@ -27,11 +29,9 @@ For cloud-specific `values.yaml` content (EKS/AKS/GKE/OCP), see `04-cloud-config
 
 ## Step A — Install cert-manager (ALL paths, required first)
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/kubernetes.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
 
 cert-manager must be installed and running **before** Mission Control.
-
-> ⚠️ The release **must** be named `cert-manager` and installed in the `cert-manager` namespace. Any other name causes `"The deployment cert-manager was not found"` errors in KOTS.
 
 ```bash
 # Install cert-manager CRDs
@@ -46,16 +46,17 @@ helm install cert-manager jetstack/cert-manager \
   --version v1.16.1 \
   --set 'extraArgs[0]=--enable-certificate-owner-ref=true'
 
-# Verify
-kubectl get pods -n cert-manager
-# All 3 pods (cert-manager, cainjector, webhook) must be Running
+# Wait for all three rollouts to complete
+kubectl rollout status deployment cert-manager -n cert-manager
+kubectl rollout status deployment cert-manager-cainjector -n cert-manager
+kubectl rollout status deployment cert-manager-webhook -n cert-manager
 ```
 
 > ⚠️ The `--enable-certificate-owner-ref=true` flag is **critical**: it ensures certificate Secrets are automatically deleted when the Certificate resource is removed (prevents orphaned secrets after cluster deletion).
 
 ### OpenShift: use OperatorHub instead of Helm
 
-For OCP 1.18.5+, cert-manager must come from the Red Hat OpenShift cert-manager Operator:
+For OCP environments (1.18.5+), cert-manager must come from the Red Hat OpenShift cert-manager Operator:
 
 1. OCP web console → **Operators → OperatorHub**
 2. Search: `cert-manager Operator for Red Hat OpenShift`
@@ -67,20 +68,61 @@ For OCP 1.18.5+, cert-manager must come from the Red Hat OpenShift cert-manager 
 
 ---
 
-## Step B — Prepare the Kubernetes cluster
+## Step B — Set environment variables and prepare the cluster
+
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
 
 ```bash
-# Confirm Kubernetes version
-kubectl version --short
+export MC_NAMESPACE=mission-control
+export MC_RELEASE_NAME=mc-release            # must NOT contain the string "mission-control"
+export MC_VERSION=v1.20.1                    # the MC Helm chart version to install
+export PULL_SECRET_NAME=${MC_RELEASE_NAME}-registry   # default pull secret name pattern
+export ENTITLEMENT_KEY=YOUR_IBM_ENTITLEMENT_KEY
+export IBM_EMAIL=you@example.com
+```
 
-# Confirm node labels (must be done first — see 01-preflight.md)
+> Environment variables don't persist across terminal sessions — re-export them if you open a new shell.
+
+```bash
+# Create the namespace (pull secret and Helm release must live in the same namespace)
+kubectl create namespace $MC_NAMESPACE
+kubectl get namespace $MC_NAMESPACE
+
+# Confirm Kubernetes version and node labels (see 01-preflight.md)
+kubectl version --short
 kubectl get nodes --show-labels | grep mission-control
 
 # Confirm StorageClass has WaitForFirstConsumer
 kubectl get storageclass
 kubectl describe storageclass YOUR_CLASS | grep VolumeBindingMode
-# Must show: WaitForFirstConsumer
 ```
+
+---
+
+## Step C — Create the ICR image pull secret
+
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
+
+Entitled images (`hcd`, `dse-mgmtapi`, `cql-router`, `cqlsh-pod`) are pulled from `cp.icr.io` using a Kubernetes `docker-registry` secret. The username is always the fixed value `cp`; the password is your IBM entitlement key.
+
+```bash
+kubectl create secret docker-registry $PULL_SECRET_NAME \
+  --docker-server=cp.icr.io \
+  --docker-username=cp \
+  --docker-password=$ENTITLEMENT_KEY \
+  --namespace=$MC_NAMESPACE
+
+# Verify
+kubectl get secret $PULL_SECRET_NAME -n $MC_NAMESPACE
+kubectl get secret $PULL_SECRET_NAME -n $MC_NAMESPACE \
+  -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d
+```
+
+You only need to create this secret **once**, in the operator namespace. Mission Control automatically replicates every pull secret listed in `global.imageConfig` into project namespaces as clusters are provisioned — you don't need to create it manually in every cluster namespace.
+
+If you use multiple clusters (e.g., separate control plane and data plane clusters), repeat this command against each cluster's `kubeconfig` context.
+
+> ⚠️ **Authentication failures?** `--docker-username` must be exactly `cp` (lowercase); the server must be `cp.icr.io` (not `icr.io` directly); check for leading/trailing whitespace in the entitlement key; regenerate the key at https://myibm.ibm.com/products-services/containerlibrary if it's expired.
 
 ---
 
@@ -88,33 +130,22 @@ kubectl describe storageclass YOUR_CLASS | grep VolumeBindingMode
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
 
-Your `LICENSE_ID` is used as **both** the Helm registry username and password.
+The chart is published to the OCI registry at `oci://icr.io/mission-control-helm/mission-control`. No `helm repo add` is required.
 
 ```bash
-# 1. Log in to the Helm OCI registry
-helm registry login registry.replicated.com \
-  --username 'YOUR_LICENSE_ID' \
-  --password 'YOUR_LICENSE_ID'
+# Optional: pull the chart for offline inspection
+helm pull oci://icr.io/mission-control-helm/mission-control --version $MC_VERSION
 
-# 2. Create your values.yaml (see 04-cloud-config.md for cloud-specific values)
-
-# 3. Install Mission Control
-helm install mc-release \
-  oci://registry.replicated.com/mission-control/mission-control \
-  --namespace mission-control \
-  --create-namespace \
-  -f values.yaml
-
-# 4. Watch pods come up
-kubectl get pods -n mission-control -w
+# Optional: inspect all available chart values before installing
+helm show values oci://icr.io/mission-control-helm/mission-control --version $MC_VERSION
 ```
 
-> ⚠️ **Release name must NOT contain `mission-control`** — this causes internal naming conflicts. Use `mc-release`, `mc-prod`, etc.  
-> ⚠️ **Data plane release name must exactly match the control plane release name.**
+### Minimal `overrides.yaml`
 
-### Minimal `values.yaml` (control plane)
+An `overrides.yaml` is required — the chart validates several components at install time and a bare install without values fails. At minimum, configure Loki storage (or disable it) and Dex with at least one auth connector.
 
 ```yaml
+# overrides.yaml
 controlPlane: true
 disableCertManagerCheck: true
 
@@ -155,10 +186,40 @@ aggregator:
   enabled: true
 ```
 
+If your pull secret name differs from the default (`${MC_RELEASE_NAME}-registry`), also add:
+
+```yaml
+global:
+  imageConfig:
+    defaults:
+      pullSecrets:
+        - "YOUR_SECRET_NAME"
+```
+
 ### Generate a bcrypt password hash
 ```bash
 echo YOUR_PASSWORD | htpasswd -BinC 10 admin | cut -d: -f2
 ```
+
+### Install
+
+```bash
+helm install $MC_RELEASE_NAME \
+  oci://icr.io/mission-control-helm/mission-control \
+  --version $MC_VERSION \
+  --namespace $MC_NAMESPACE \
+  --create-namespace \
+  -f overrides.yaml
+
+# Watch pods come up
+kubectl get pods -n $MC_NAMESPACE -w
+
+# Check the Helm release status
+helm status $MC_RELEASE_NAME -n $MC_NAMESPACE
+```
+
+> ⚠️ **Release name must NOT contain `mission-control`** — this causes internal naming conflicts. Use `mc-release`, `mc-prod`, etc.
+> ⚠️ **Data plane release name must exactly match the control plane release name.**
 
 ### Post-install: access the UI
 ```bash
@@ -176,94 +237,45 @@ kubectl port-forward svc/mc-release-mission-control-ui 8443:443 -n mission-contr
 
 ---
 
-## Path 2 — KOTS
+## Path 2 — Helm with Separate Cluster Resources
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc.html
-
-```bash
-# 1. Install the KOTS kubectl plugin (version 1.105+)
-curl https://kots.io/install | bash
-kubectl kots version   # verify
-
-# 2. Install Mission Control via KOTS
-kubectl kots install mission-control \
-  --namespace mission-control
-
-# Answer the prompts; the CLI will provide a URL for the KOTS admin console
-# RECORD the admin password you set — it cannot be recovered
-
-# 3. If port-forward session drops, restart it:
-kubectl kots admin-console -n mission-control
-# Open: http://localhost:8800
-```
-
-### In the KOTS web UI
-
-1. **Upload license file** when prompted
-2. **Set admin user + password** — ⚠️ **REQUIRED since v1.9.0** — preflight fails without this
-   ```bash
-   # Generate hash:
-   echo YOUR_PASSWORD | htpasswd -BinC 10 admin | cut -d: -f2
-   ```
-3. **Deployment Mode**: Control Plane (first install) or Data Plane (additional regions)
-4. **Observability Storage**: Choose S3 / GCS / Azure Blob — configure **two separate buckets** (metrics ≠ logs)
-5. **StorageClass**: Ensure `WaitForFirstConsumer` class is selected
-6. Click **Run preflight checks** → resolve any failures → **Deploy**
-
-> ⚠️ KOTS Admin Console (port 8800) and the Mission Control UI are **separate authentication systems**. KOTS manages the installation; MC UI manages database operations.
-
-### EKS prerequisite for KOTS
-```bash
-# KOTS requires a default StorageClass before install
-kubectl patch storageclass gp2 \
-  -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
-```
-
-### Change the MC UI password via KOTS
-```bash
-kubectl kots admin-console -n mission-control
-# Navigate to: Authentication → Static Credentials → update Password Hash field
-# Then restart Dex to apply:
-kubectl rollout restart deployment -n mission-control -l app.kubernetes.io/name=dex
-```
-
----
-
-## Path 3 — Helm with Separate Cluster Resources
-
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm-separate-cluster-resources.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm-separate-cluster-resources.html
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-cluster-level-resources-separately.html
 
 Use when cluster-scoped resources (CRDs, ClusterRoles) must be managed by a different team than the application deployment.
 
 ```bash
 # Step 1 — cluster-admin installs cluster-scoped resources first
-helm registry login registry.replicated.com \
-  --username 'YOUR_LICENSE_ID' \
-  --password 'YOUR_LICENSE_ID'
+helm repo add mc-cluster-obj https://helm.k8ssandra.io/mission-control
+helm repo update
 
-helm install mc-cluster-resources \
-  oci://registry.replicated.com/mission-control/mission-control-cluster-resources \
-  --namespace mission-control \
-  --create-namespace
+helm install mc-cluster-obj mc-cluster-obj/mc-cluster-obj \
+  -n $MC_NAMESPACE \
+  --create-namespace \
+  --set targetReleaseName=$MC_RELEASE_NAME \
+  --set targetNamespace=$MC_NAMESPACE
 
 # Step 2 — app team installs MC (no cluster-admin needed)
-helm install mc-release \
-  oci://registry.replicated.com/mission-control/mission-control \
-  --namespace mission-control \
+helm install $MC_RELEASE_NAME \
+  oci://icr.io/mission-control-helm/mission-control \
+  --version $MC_VERSION \
+  --namespace $MC_NAMESPACE \
   --set global.clusterScopedResources=false \
+  --set dex.rbac.createClusterScoped=false \
+  --set kube-state-metrics.rbac.create=false \
   --skip-crds \
-  -f values.yaml
+  --no-hooks \
+  -f overrides.yaml
 ```
 
-> ⚠️ **Upgrade order:** Always upgrade `mc-cluster-resources` first, then `mc-release`.
+> ⚠️ **Upgrade order:** Always upgrade `mc-cluster-obj` first, then the main release, using the same flags.
 
-For narrow-scope RBAC so app team can run `helm upgrade` without cluster-admin:  
+For narrow-scope RBAC so the app team can run `helm upgrade` without cluster-admin:
 📖 https://docs.datastax.com/en/mission-control/administration/mc/helm-upgrade-rbac.html
 
 ---
 
-## Path 4 — OpenShift (Helm recommended)
+## Path 3 — OpenShift (Helm)
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-openshift.html
 
@@ -275,7 +287,6 @@ For narrow-scope RBAC so app team can run `helm upgrade` without cluster-admin:
 ### Grant SCC permissions before install
 
 ```bash
-# Grant nonroot-v2 SCC to all MC service accounts
 for SA in loki mission-control mission-control-agent mission-control-aggregator \
   mission-control-cass-operator mission-control-dex \
   mission-control-k8ssandra-operator mission-control-kube-state-metrics \
@@ -284,29 +295,41 @@ for SA in loki mission-control mission-control-agent mission-control-aggregator 
 done
 ```
 
-### Get your OCP cluster domain (needed for ingress)
-```bash
-oc get ingress.config.openshift.io cluster -o jsonpath='{.spec.domain}'
-# Example: apps.myocp.example.com
+If your organization requires `restricted-v2` with dynamically assigned UIDs, see `05-security.md` and the OpenShift-specific overrides file referenced there.
+
+### Configure OpenShift DNS (required for Loki/Mimir)
+
+OpenShift uses `openshift-dns`/`dns-default` instead of `kube-dns`. Without this, Loki and Mimir silently fail to collect logs/metrics:
+
+```yaml
+loki:
+  global:
+    clusterDomain: cluster.local
+    dnsNamespace: openshift-dns
+    dnsService: dns-default
+mimir:
+  gateway:
+    nginx:
+      config:
+        resolver: dns-default.openshift-dns.svc.cluster.local
+  nginx:
+    nginxConfig:
+      resolver: "dns-default.openshift-dns.svc"
 ```
 
 ### Install with OCP-specific values
-```bash
-helm registry login registry.replicated.com \
-  --username 'YOUR_LICENSE_ID' \
-  --password 'YOUR_LICENSE_ID'
 
-helm install mc-release \
-  oci://registry.replicated.com/mission-control/mission-control \
-  --namespace mission-control \
+```bash
+helm install $MC_RELEASE_NAME \
+  oci://icr.io/mission-control-helm/mission-control \
+  --version $MC_VERSION \
+  --namespace $MC_NAMESPACE \
   --create-namespace \
   -f values-openshift.yaml \
   --timeout 15m
 ```
 
-For the required OCP-specific values (DNS resolver, no HAProxy ingress, regionDomain), see `04-cloud-config.md`.
-
-> ⚠️ OCP silently fails to collect metrics/logs if DNS is not configured correctly for Loki and Mimir. See `04-cloud-config.md` → OpenShift section for the exact `dnsNamespace` and resolver values.
+For the required OCP-specific values (DNS resolver, regionDomain, etc.), see `04-cloud-config.md`.
 
 ### Verify SCC assignment after install
 ```bash
@@ -315,27 +338,159 @@ oc get pod mc-release-k8ssandra-operator-PODID \
 # Should show: nonroot-v2 (or restricted-v2 if you configured that)
 ```
 
-### OCP: restricted-v2 SCC (optional, higher security)
-If your organization requires `restricted-v2` with dynamically assigned UIDs:
-```bash
-# Check your namespace UID range
-oc get namespace mission-control \
-  -o jsonpath='{.metadata.annotations.openshift\.io/sa\.scc\.uid-range}'
-
-# Download and apply the restricted-v2 override file from docs, then:
-helm upgrade --install mc-release \
-  oci://registry.replicated.com/mission-control/mission-control \
-  --namespace mission-control \
-  -f values.yaml \
-  -f openshift-overrides-restricted-scc.yaml \
-  --timeout 15m
-```
-
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-openshift.html
 
 ---
 
-## Step C — Verify Installation
+## Migrate an existing Replicated installation to ICR
+
+📖 Source: https://docs.datastax.com/en/mission-control/install/migrate-replicated-to-icr.html
+
+Replicated is no longer supported. If Mission Control was originally installed via `helm install` from the Replicated proxy registry, or via the KOTS admin console, you must migrate it to ICR **in place** — this switches the image pull source without reinstalling MC or losing data.
+
+> ⚠️ **Schedule a maintenance window.** Restarting `cass-operator` (a required step) reconciles all managed database clusters and restarts database pods to pull images from `cp.icr.io`. Clusters with replication factor ≥3 tolerate this as a rolling restart; lower-RF clusters experience downtime. MC control plane pods also restart briefly during the Helm upgrade regardless of replication factor.
+
+Two variants exist, depending on how MC was originally installed:
+
+### Variant A — Helm-based Replicated install (no KOTS admin console)
+
+1. **Gather:** original release name, MC namespace, all cluster namespaces, IBM entitlement key, the exact currently-installed MC version (you must migrate to the **same version** — upgrade only after migrating), and the original `values.yaml` file(s).
+2. **Update the existing pull secret in place** (Replicated named it `${RELEASE_NAME}-registry`):
+   ```bash
+   kubectl create secret docker-registry ${RELEASE_NAME}-registry \
+     --docker-server=cp.icr.io \
+     --docker-username=cp \
+     --docker-password=${IBM_ENTITLEMENT_KEY} \
+     --namespace=${MC_NAMESPACE} \
+     --dry-run=client -o yaml | kubectl apply -f -
+   ```
+3. **Create `helm-overrides.yaml`** redirecting all image references from the Replicated proxy to `icr.io`/`cp.icr.io` (see the full sample below).
+4. **Run `helm upgrade`** with the original values file(s) followed by `helm-overrides.yaml` (later files win):
+   ```bash
+   helm upgrade ${RELEASE_NAME} oci://icr.io/mission-control-helm/mission-control \
+     --version ${TARGET_VERSION} \
+     -n ${MC_NAMESPACE} \
+     -f ${ORIGINAL_VALUES_FILE} \
+     -f helm-overrides.yaml \
+     --server-side true
+   ```
+5. **Restart `cass-operator`** (below) so `CassandraDatacenter` resources pick up the new `cp.icr.io` image config.
+
+### Variant B — KOTS-based install
+
+KOTS owns the Helm release and renders `repl{{ }}` templates into concrete values at deploy time. Migration is three phases: **extract** the effective values, **hand off** by scaling KOTS to zero, then **upgrade** with ICR overrides.
+
+1. **Export the values KOTS currently has deployed:**
+   ```bash
+   helm get values ${RELEASE_NAME} -n ${MC_NAMESPACE} -o yaml > kots-current-values.yaml
+   cp kots-current-values.yaml my-values.yaml
+   ```
+   Review it for deployment mode, TLS settings, Dex config, observability storage, and ingress — all of it must carry forward.
+2. **Update the pull secret in place** (same command as Variant A, step 2).
+3. **Scale down KOTS** so it stops reconciling over your upcoming `helm upgrade`:
+   ```bash
+   kubectl scale deployment kotsadm kotsadm-operator -n ${KOTSADM_NAMESPACE} --replicas=0
+   kubectl scale statefulset kotsadm-minio kotsadm-rqlite -n ${KOTSADM_NAMESPACE} --replicas=0
+   kubectl get pods -n ${KOTSADM_NAMESPACE} | grep kotsadm   # confirm none Running
+   ```
+4. **Add ICR overrides to `my-values.yaml`** (same block as below) and run `helm upgrade`:
+   ```bash
+   helm upgrade ${RELEASE_NAME} oci://icr.io/mission-control-helm/mission-control \
+     --version ${TARGET_VERSION} \
+     -n ${MC_NAMESPACE} \
+     -f my-values.yaml \
+     --server-side true
+   ```
+5. **Restart `cass-operator`** (below).
+6. **Remove KOTS entirely** once verified stable — this is irreversible. Delete resources directly with `kubectl`, **not** `kubectl kots remove` (that command times out because `kotsadm` is already scaled to zero):
+   ```bash
+   kubectl delete deployment kotsadm kotsadm-operator -n ${KOTSADM_NAMESPACE} --ignore-not-found
+   kubectl delete statefulset kotsadm-minio kotsadm-rqlite -n ${KOTSADM_NAMESPACE} --ignore-not-found
+   kubectl delete service kotsadm kotsadm-http -n ${KOTSADM_NAMESPACE} --ignore-not-found
+   kubectl delete pvc -n ${KOTSADM_NAMESPACE} -l app=kotsadm-minio --ignore-not-found
+   kubectl delete pvc -n ${KOTSADM_NAMESPACE} -l app=kotsadm-rqlite --ignore-not-found
+   kubectl delete secret    -n ${KOTSADM_NAMESPACE} -l kots.io/kotsadm=true --ignore-not-found
+   kubectl delete configmap -n ${KOTSADM_NAMESPACE} -l kots.io/kotsadm=true --ignore-not-found
+   ```
+
+### ICR overrides block (both variants)
+
+```yaml
+# Disable Replicated SDK and KOTS-managed pull secret generation
+replicated:
+  enabled: false
+disablePullSecretsGeneration: true
+
+# MC operator
+image:
+  registry: icr.io
+  repository: datastax-mission-control/mission-control
+
+# MC UI
+ui:
+  image:
+    registry: icr.io
+    repository: datastax-mission-control/mission-control-ui
+
+# CRD patcher
+client:
+  image:
+    registry: icr.io
+    repository: datastax-mission-control/k8ssandra-client
+
+global:
+  imageConfig:
+    defaults:
+      pullSecrets:
+        - PULL_SECRET_NAME   # <RELEASE_NAME>-registry
+    images:
+      k8ssandra-client:
+        registry: icr.io
+        repository: datastax-mission-control
+        name: k8ssandra-client
+      cql-router:                    # entitled — requires cp.icr.io pull secret
+        registry: cp.icr.io
+        repository: cp/ibm-ds-mission-control
+      cqlsh:                         # entitled — requires cp.icr.io pull secret
+        registry: cp.icr.io
+        repository: cp/ibm-ds-mission-control
+    types:
+      hcd:                           # entitled — requires cp.icr.io pull secret
+        registry: cp.icr.io
+        repository: cp/ibm-ds-mission-control
+        name: hcd
+      dse:                           # entitled — requires cp.icr.io pull secret
+        registry: cp.icr.io
+        repository: cp/ibm-ds-mission-control
+        name: dse-mgmtapi
+
+# MC Dex
+dex:
+  image:
+    repository: icr.io/datastax-mission-control/mission-control-dex
+```
+
+### Restart cass-operator (both variants)
+
+```bash
+kubectl get deployments -n ${MC_NAMESPACE} | grep cass-operator
+kubectl rollout restart deployment/cass-operator -n ${MC_NAMESPACE}
+kubectl rollout status deployment/cass-operator -n ${MC_NAMESPACE} --timeout=3m
+
+# Watch and confirm database pods pull from cp.icr.io, per cluster namespace
+kubectl get pods -n CLUSTER_NAMESPACE -w
+kubectl get pods -n CLUSTER_NAMESPACE \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.containers[*]}{.image}{"\n"}{end}{end}'
+
+# Confirm CassandraDatacenter health
+kubectl get cassandradatacenter -A
+```
+
+All images should reference `icr.io/datastax-mission-control/…` or `cp.icr.io/cp/ibm-ds-mission-control/…`. If a pod is stuck `ImagePullBackOff`, verify the pull secret contains a valid `cp.icr.io` entry.
+
+---
+
+## Step D — Verify Installation
 
 ```bash
 # All MC pods should be Running or Completed

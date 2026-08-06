@@ -107,8 +107,6 @@ global:
     - name: MC_PULL_SECRET_NAME
 ```
 
-> ⚠️ KOTS installations do **not** support Helm-style security overrides.
-
 ### Verify pull secret creation
 ```bash
 kubectl get secrets -n mission-control --field-selector type=kubernetes.io/dockerconfigjson
@@ -170,7 +168,8 @@ k8ssandra-operator:
 
 Apply after install:
 ```bash
-helm upgrade mc-release oci://registry.replicated.com/mission-control/mission-control \
+helm upgrade mc-release oci://icr.io/mission-control-helm/mission-control \
+  --version $MC_VERSION \
   --namespace mission-control \
   -f values.yaml \
   -f values-security.yaml
@@ -223,14 +222,6 @@ dex:
 ```
 
 > ⚠️ Always use TLS (port 636 with `insecureNoSSL: false`). Plain LDAP (port 389) leaks credentials.
-
-### Via KOTS UI
-
-Navigate to: **Authentication → LDAP** and fill in:
-- Host (and optional port)
-- Bind DN and Bind Password
-- User Base DN, User Filter, Username Attribute
-- Group Base DN, Group Filter, Group/User Matchers
 
 ---
 

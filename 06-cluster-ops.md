@@ -748,7 +748,7 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
 ```bash
 kubectl config use-context CP_EAST
 helm install mc-release \
-  oci://registry.replicated.com/mission-control/mission-control \
+  oci://icr.io/mission-control-helm/mission-control \
   --namespace mission-control --create-namespace \
   -f values-cp-east.yaml
 ```
@@ -760,7 +760,7 @@ helm install mc-release \
 ```bash
 kubectl config use-context DP_WEST
 helm install mc-release \          # SAME name as control plane
-  oci://registry.replicated.com/mission-control/mission-control \
+  oci://icr.io/mission-control-helm/mission-control \
   --namespace mission-control --create-namespace \
   -f values-dp-west.yaml
 ```
@@ -871,7 +871,7 @@ spec:
 # Step 1: Upgrade each data plane cluster FIRST
 kubectl config use-context DP_WEST
 helm upgrade mc-release \
-  oci://registry.replicated.com/mission-control/mission-control \
+  oci://icr.io/mission-control-helm/mission-control \
   --namespace mission-control \
   -f values-dp-west.yaml
 kubectl get pods -n mission-control -w
@@ -879,7 +879,7 @@ kubectl get pods -n mission-control -w
 # Step 2: Upgrade the control plane LAST
 kubectl config use-context CP_EAST
 helm upgrade mc-release \
-  oci://registry.replicated.com/mission-control/mission-control \
+  oci://icr.io/mission-control-helm/mission-control \
   --namespace mission-control \
   -f values-cp-east.yaml
 ```
