@@ -972,7 +972,14 @@ kubectl annotate CassandraDatacenter dc1 -n my-project \
 
 📖 Source: https://docs.datastax.com/en/mission-control/migrate/migration-overview.html
 
-### Zero-downtime: add a new MC-managed datacenter
+> **Which migration path do you need?**
+>
+> | Your current setup | Migration path |
+> |---|---|
+> | **K8ssandra operator** managing your cluster | Load `09-k8ssandra-migration.md` — in-place operator adoption, no data migration. 📖 https://docs.datastax.com/en/mission-control/migrate/k8ssandra-to-mission-control.html |
+> | **Standalone OSS Cassandra** cluster (not K8ssandra-managed) | Continue below — zero-downtime new DC strategy. 📖 https://docs.datastax.com/en/mission-control/migrate/oss-cass-to-mission-control.html |
+
+### Zero-downtime: add a new MC-managed datacenter (OSS Cassandra → Mission Control)
 
 ```yaml
 # migration-cluster.yaml
