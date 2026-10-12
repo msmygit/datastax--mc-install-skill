@@ -1,10 +1,10 @@
 ---
 name: mc-install
 description: >-
-  Install, configure, and operate DataStax Mission Control on any Kubernetes flavor (EKS, AKS, GKE, OpenShift) — online and air-gapped — to deploy and manage HCD, DSE, and Cassandra clusters. Use when a DBA, K8s operator, or platform engineer needs guidance on Mission Control installation, pre-flight checks, license acquisition (paid or trial), cloud-provider-specific configuration, air-gap/offline installation, HCD cluster deployment, multi-region setup, ingress, TLS/security, LDAP/OIDC auth, observability, backup/restore, upgrades, migration, or troubleshooting. Also use when migrating K8ssandra-managed clusters to Mission Control (in-place operator adoption — no data migration required). Trigger phrases: "Mission Control", "install Mission Control", "HCD cluster", "mc-install", "DataStax MC", "K8ssandra operator", "cass-operator", "deploy Cassandra on K8s", "Mission Control on EKS", "Mission Control on AKS", "Mission Control on GKE", "Mission Control on OpenShift", "MissionControlCluster", "IBM Container Registry", "ICR", "Helm install MC", "migrate from Replicated", "air-gap Mission Control", "offline install", "private registry", "Skopeo mirror", "migrate from K8ssandra", "K8ssandra to Mission Control", "K8ssandra migration", "K8ssandraCluster adoption", "migrate K8ssandra cluster".
+  Install, configure, and operate DataStax Mission Control (current through 1.21.0) on any Kubernetes flavor (EKS, AKS, GKE, OpenShift) — online and air-gapped — to deploy and manage HCD, DSE, and Cassandra clusters. Use when a DBA, K8s operator, or platform engineer needs guidance on Mission Control installation, pre-flight checks, license acquisition (paid or trial), cloud-provider-specific configuration, air-gap/offline installation with Hauler, HCD cluster deployment, multi-region setup, ingress, TLS/security, certificate and CA expiration, LDAP/OIDC auth, CQL gateway and external CQL access, observability, pod sizing, backup/restore and restore compatibility, rolling restart, upgrade SSTables, terminating a datacenter, upgrades, migration, or troubleshooting. Also use when migrating K8ssandra-managed clusters to Mission Control (in-place operator adoption — no data migration required). Trigger phrases: "Mission Control", "install Mission Control", "HCD cluster", "mc-install", "DataStax MC", "K8ssandra operator", "cass-operator", "deploy Cassandra on K8s", "Mission Control on EKS", "Mission Control on AKS", "Mission Control on GKE", "Mission Control on OpenShift", "MissionControlCluster", "IBM Container Registry", "ICR", "Helm install MC", "migrate from Replicated", "air-gap Mission Control", "offline install", "private registry", "Hauler", "Skopeo", "CQL gateway", "CqlConnectivity", "cqlsh pod", "rolling restart", "upgrade sstables", "terminate datacenter", "backup restore compatibility", "certificate expiration", "pod sizing", "service accounts", "migrate from K8ssandra", "K8ssandra to Mission Control", "K8ssandra migration", "K8ssandraCluster adoption", "migrate K8ssandra cluster".
 metadata:
   author: Bob
-  version: "3.0"
+  version: "4.0"
   display_name: Mission Control Install & Operate
   short_description: Expert guide — install, configure, and operate DataStax Mission Control (online + air-gap) on EKS/AKS/GKE/OpenShift.
   iconName: dataBase
@@ -18,7 +18,7 @@ This skill is split into focused topic files. **Load the relevant file(s) with `
 📁 **Skill directory:** `~/.bob/skills/mc-install/`  
 📖 **Primary docs:** https://docs.datastax.com/en/mission-control/index.html
 
-> ⚠️ **As of Mission Control 1.20.1, Replicated (KOTS) is no longer supported as an installation method.** All new installs use Helm from the IBM Container Registry (ICR). If you have an existing Replicated/KOTS installation, route to the migration guide first.
+> ⚠️ **Support for KOTS and Replicated was removed in Mission Control 1.20.1.** All new installs use Helm from the IBM Container Registry (ICR). If you have an existing Replicated/KOTS installation, route to the migration guide first.
 > 📖 Install (Helm/ICR): https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
 > 📖 Migrate Replicated → ICR: https://docs.datastax.com/en/mission-control/install/migrate-replicated-to-icr.html
 
@@ -75,9 +75,12 @@ This skill is split into focused topic files. **Load the relevant file(s) with `
 | Helm | **3.14.0–3.18.0 only** (3.19+ not yet supported) |
 | cert-manager | 1.16.1 recommended |
 
-**Supported DB versions:** HCD 2.0, HCD 1.2.3+, HCD 1.1, DSE 6.8 (6.8.25+, except 6.8.27/6.8.45), DSE 6.9, Cassandra 3.11 (3.11.7–3.11.17), 4.0, 4.1, 5.0 (except 5.0.0).
+**Supported DB versions:** HCD 2.0 (server 2.0.7 added in MC 1.21.0), HCD 1.2.3+, HCD 1.1, DSE 6.8 (6.8.25+, except 6.8.27/6.8.45), DSE 6.9, Cassandra 3.11 (3.11.7–3.11.17), 4.0, 4.1, 5.0 (except 5.0.0).
+
+**Latest release covered by this skill: Mission Control 1.21.0** (Helm upgrades supported from 1.20.2 and 1.20.1; bundles `k8ssandra-operator` 1.33.0 and `cass-operator` 1.32.3; validated on Kubernetes 1.25.11 and 1.35.4, OpenShift 4.15.0-okd, GKE 1.32.4.1353003).
 
 📖 Source: https://docs.datastax.com/en/mission-control/misc/supported-platforms.html
+📖 Source: https://docs.datastax.com/en/mission-control/release-notes/release-notes.html
 
 ---
 
@@ -101,15 +104,16 @@ After gathering context, load the appropriate file(s) with `read_file`:
 
 | User need | Load this file |
 |-----------|---------------|
-| Hardware, software, ports, node labels, entitlement key, storage class setup | `~/.bob/skills/mc-install/01-preflight.md` |
+| Hardware, software, ports, node labels, entitlement key, storage class setup, service accounts and RBAC | `~/.bob/skills/mc-install/01-preflight.md` |
 | Online install: cert-manager, Helm (ICR), OCP, separate resources, **migrating an existing Replicated/KOTS install to ICR** | `~/.bob/skills/mc-install/02-install-online.md` |
-| Air-gap/offline install: Skopeo mirroring from ICR, private-registry values | `~/.bob/skills/mc-install/03-install-airgap.md` |
-| Cloud-specific values (EKS/AKS/GKE/OCP), DNS, ingress | `~/.bob/skills/mc-install/04-cloud-config.md` |
-| TLS/BYO CA, multi-region cert copy, LDAP, OIDC, DB encryption, TDE, client TLS, nodetool SSL | `~/.bob/skills/mc-install/05-security.md` |
-| Deploy HCD cluster, config, canary, scale nodes, replace node, rebuild DC, backup/restore, upgrades, CP outage, day-2 | `~/.bob/skills/mc-install/06-cluster-ops.md` |
+| Air-gap/offline install: **Hauler** bundle/load/copy to a private registry (primary), Skopeo for copying individual images, private-registry values, 1.21.0 Hauler manifest | `~/.bob/skills/mc-install/03-install-airgap.md` |
+| Cloud-specific values (EKS/AKS/GKE/OCP), DNS, ingress, settings catalog pointer, in-cluster communication and ports | `~/.bob/skills/mc-install/04-cloud-config.md` |
+| TLS/BYO CA, multi-region cert copy, LDAP, OIDC, DB encryption, TDE, client TLS, nodetool SSL, **certificate/CA expiration and recovery**, security-context and image-pull-secret overrides | `~/.bob/skills/mc-install/05-security.md` |
+| Deploy HCD cluster, config, canary, scale nodes, replace node, rebuild DC, **terminate a DC**, **rolling restart**, **upgrade SSTables**, backup/restore and **restore version compatibility**, upgrades, CP outage, CRD reference pointers, day-2 | `~/.bob/skills/mc-install/06-cluster-ops.md` |
+| **CQL gateways** (Ingress), `CqlConnectivity`, Secure Connect Bundle, driver connectivity, CQL console / `cqlsh-pod` customization | `~/.bob/skills/mc-install/10-cql-access.md` |
 | **Migrate K8ssandra-managed clusters** to Mission Control (in-place operator adoption, scale-down operators, `MissionControlCluster` wrapping existing `K8ssandraCluster`, verify adoption, rollback) | `~/.bob/skills/mc-install/09-k8ssandra-migration.md` |
 | Troubleshooting, diagnostics, CP outage ops, support bundle, uninstall, DBA checklist | `~/.bob/skills/mc-install/07-troubleshoot.md` |
-| Pod sizing, Grafana/Mimir/Loki scaling, alerts, custom PromQL rules, external sinks, enterprise 45+ node config | `~/.bob/skills/mc-install/08-observability.md` |
+| Pod sizing, Grafana/Mimir/Loki scaling, alerts and Alertmanager, custom PromQL rules, external sinks, enterprise 45+ node config | `~/.bob/skills/mc-install/08-observability.md` |
 
 ---
 
@@ -118,10 +122,13 @@ After gathering context, load the appropriate file(s) with `read_file`:
 - **MC vs OpsCenter?** MC supersedes OpsCenter for cloud/K8s deployments.
 - **Pricing?** Included in HCD or DSE license. OSS Cassandra nodes have additional cost.
 - **Co-location?** Nodes from different clusters can share a host; same-cluster nodes cannot.
-- **Cert expiry?** Root CA and internode certs default to 20-year expiry (v1.9.0+).
+- **Cert expiry?** Root CA, internode, client-to-node (`cql-router`), and management API certs default to 20-year expiry (v1.9.0+). Tune with `certTemplate` on the `MissionControlCluster`; load `05-security.md` for rotation and the expired-certificate recovery runbook.
+- **Workflows?** UI (Simple/Expert mode) and programmatic (`kubectl`, `mcctl`, GitOps) both drive the same Kubernetes custom resources. No agents are installed on database nodes. If the control plane is down, running clusters keep running and `cass-operator` keeps reconciling datacenter-level resources.
+- **CRD reference?** Per-version pages exist for `MissionControlCluster`, `Backup`, and `K8ssandraTask`. Pick the version matching the installed release: https://docs.datastax.com/en/mission-control/crd-reference/crd-reference-overview.html
 - **Two separate buckets?** Yes — Mimir (metrics) and Loki (logs) **cannot share** a bucket.
 - **Release name rule?** Must NOT contain `mission-control` — causes naming conflicts.
-- **What happened to Replicated/KOTS?** Deprecated as of 1.20.1 and removed entirely in later versions. All installs now use Helm from `oci://icr.io/mission-control-helm/mission-control`. Existing Replicated/KOTS installs must migrate in place — see `02-install-online.md`.
+- **What happened to Replicated/KOTS?** Support for both was removed in 1.20.1. All installs now use Helm from `oci://icr.io/mission-control-helm/mission-control`. Existing Replicated/KOTS installs must migrate in place — see `02-install-online.md`.
+- **How do I install air-gapped?** Use Hauler to bundle images and the chart from the release-notes manifest, then load them into a private registry and install from `oci://<REGISTRY>/hauler/mission-control`. See `03-install-airgap.md`. Skopeo is only for copying individual images.
 - **Where do entitled images come from?** `cp.icr.io` (requires an IBM entitlement key as the pull-secret password, username `cp`). Public MC images (`mission-control`, `mission-control-ui`, `mission-control-dex`, `k8ssandra-client`) come from the non-entitled `icr.io` registry.
 - **Migrating from K8ssandra?** Load `09-k8ssandra-migration.md`. This is an in-place operator adoption — no data migration or cluster recreation needed. Scale down both K8ssandra operators, install MC, create a `MissionControlCluster` wrapping your existing `K8ssandraCluster` spec (name must match exactly), and MC adopts the cluster automatically. **Always cite:** https://docs.datastax.com/en/mission-control/migrate/k8ssandra-to-mission-control.html
 

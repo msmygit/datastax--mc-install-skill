@@ -1,11 +1,28 @@
-# 04 — Cloud-Specific Configuration: EKS, AKS, GKE, OpenShift — Values, DNS, Ingress
+# 04 — Cloud-Specific Configuration: EKS, AKS, GKE, OpenShift — Values, DNS, Ingress & Settings
 
 This file contains the cloud-provider-specific `values.yaml` snippets, storage backend configuration, DNS setup, and ingress configuration for each supported platform.
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html  
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-openshift.html  
 📖 Source: https://docs.datastax.com/en/mission-control/install/ingress.html  
-📖 Source: https://docs.datastax.com/en/mission-control/install/installation-requirements.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/installation-requirements.html  
+📖 Source: https://docs.datastax.com/en/mission-control/reference/mc-settings.html  
+📖 Source: https://docs.datastax.com/en/mission-control/reference/in-cluster-app-comm.html  
+📖 Source: https://docs.datastax.com/en/mission-control/administration/data-plane/configure.html
+
+---
+
+## Configuration Settings Catalog Pointer
+
+For a complete catalog of all top-level and subchart Helm configuration settings, consult the official documentation:
+📖 https://docs.datastax.com/en/mission-control/reference/mc-settings.html
+
+Key top-level setting groups include:
+- **Topology:** `controlPlane` (boolean, default: `true`). Set to `false` for dedicated data plane clusters.
+- **Node Affinity:** `nodeSelector` (e.g. `mission-control.datastax.com/role: platform`) and `allowOperatorsOnDatabaseNodes` (boolean, default: `false`).
+- **Platform Ingress:** `ingress.enabled`, `ingress.regionDomain`, `ingress.wildcardDomain`.
+- **UI & Auth:** `ui.enabled`, `ui.baseUrl`, `ui.https.enabled`, `dex.config.enablePasswordDB`, `dex.config.staticPasswords`.
+- **Observability:** `loki`, `mimir`, `grafana`, `agent`, `aggregator`.
 
 ---
 
@@ -18,7 +35,7 @@ MC uses a `regionDomain` and `wildcardDomain` model for ingress:
 | Value | Example | Routes to |
 |-------|---------|-----------|
 | `ingress.regionDomain` | `mc.us-east.example.com` | MC UI and API |
-| `ingress.wildcardDomain` | `*.mc.us-east.example.com` | Grafana (`grafana.mc...`), DB clusters (`cluster.project.mc...`) |
+| `ingress.wildcardDomain` | `*.mc.us-east.example.com` | Grafana (`grafana.mc...`), Vector aggregator (`vector.mc...`), DB clusters |
 
 ```yaml
 ingress:
@@ -26,6 +43,8 @@ ingress:
   regionDomain: "mc.us-east.example.com"
   wildcardDomain: "*.mc.us-east.example.com"
 ```
+
+When ingress is enabled, Mission Control automatically creates a ConfigMap named `mission-control-ingress-config` containing domain configuration for operators to read dynamically.
 
 ### DNS setup (all clouds except OpenShift)
 After install, get the ingress external IP or hostname:
@@ -37,7 +56,7 @@ Create DNS records in your provider:
 - `A` (or `CNAME`) record: `mc.us-east.example.com` → ingress IP/hostname
 - Wildcard `A` (or `CNAME`): `*.mc.us-east.example.com` → same ingress IP/hostname
 
-> On OpenShift: Ingress objects are automatically converted to Routes. No manual DNS setup needed.
+> On OpenShift: Ingress objects are automatically converted to Routes. No manual wildcard DNS setup needed.
 
 ### OIDC + Ingress: set `ui.baseUrl`
 If you use OIDC authentication alongside Ingress, you **must** set:
@@ -48,6 +67,21 @@ ui:
 Without this, OIDC redirects fail because the redirect URI won't match.
 
 📖 Source: https://docs.datastax.com/en/mission-control/secure/mc/openid-connector.html
+
+---
+
+## In-Cluster Application Communication & Port Flows
+
+📖 Source: https://docs.datastax.com/en/mission-control/reference/in-cluster-app-comm.html
+
+Applications running in the same Kubernetes cluster connect to databases using either:
+1. **Data API Gateway (HTTP)**: ClusterIP service `CLUSTER-DC-data-api-cip.PROJECT_SLUG.svc.cluster.local:8080` (translates HTTP to CQL internally).
+2. **CQL Native Protocol**: Headless service `CLUSTER-DC-service.PROJECT_SLUG.svc.cluster.local:9042` using native Cassandra/HCD drivers.
+
+Telemetry and control flows:
+- **Telemetry aggregation**: Database nodes forward metrics to the Data Plane Vector aggregator on port `6060` (or `6000`). Data planes forward to the Control Plane Vector aggregator via Ingress on `vector.<regionDomain>:443` (TLS) or legacy NodePort `30600`.
+- **Management API**: Operators communicate with Cassandra pods on `8080` (mTLS).
+- **Internal observability**: Vector forwards to Loki (logs) and Mimir (metrics) on port `8443` (TLS).
 
 ---
 
@@ -439,9 +473,11 @@ oc get svc -n openshift-dns
 # If your cluster uses a different DNS service name, update dnsService above
 ```
 
-### OCP data plane `values.yaml`
+### Data Plane `values.yaml` (OCP or any multi-region data plane)
+
+📖 Source: https://docs.datastax.com/en/mission-control/administration/data-plane/configure.html
+
 ```yaml
-# For a data plane on OCP:
 controlPlane: false
 disableCertManagerCheck: true
 
@@ -461,21 +497,37 @@ loki:
   enabled: false
 mimir:
   enabled: false
+agent:
+  enabled: false
 
-# Forward telemetry to control plane
+# Forward telemetry to control plane Vector aggregator
 aggregator:
+  service:
+    type: ClusterIP
+    ports:
+      - name: vector
+        protocol: TCP
+        port: 6000
+        targetPort: 6000
   customConfig:
     sinks:
       control_plane_aggregator:
         type: vector
-        address: "https://vector.mc.apps.myocp-cp.example.com"
+        address: "https://vector.mc.example.com"
+        tls:
+          enabled: true
+          crt_file: /tmp/certs/aggregator-cp/tls.crt
+          key_file: /tmp/certs/aggregator-cp/tls.key
+          ca_file: /tmp/certs/aggregator-cp/ca.crt
+          verify_certificate: true
 ```
 
 ---
 
 ## Vector aggregator: NodePort vs Ingress (v1.18.0+)
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/ingress.html
 
 Since v1.18.0, the Vector aggregator default changed from NodePort to Ingress for accepting metrics/logs from external data planes.
 
@@ -514,6 +566,7 @@ MC Helm values files are GitOps-compatible — store them in version control wit
 
 ## Next Steps
 
-- TLS, LDAP, OIDC → `05-security.md`
+- TLS, cert CA expiration, LDAP, OIDC → `05-security.md`
 - Deploy HCD/DSE cluster, multi-region, backups → `06-cluster-ops.md`
+- External CQL access via CQL Gateway → `10-cql-access.md`
 - Troubleshooting → `07-troubleshoot.md`

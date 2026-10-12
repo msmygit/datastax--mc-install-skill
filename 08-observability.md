@@ -19,16 +19,18 @@ Use these as your Kubernetes resource `requests` and `limits` for each MC platfo
 | `mission-control-operator` | 100m | 256Mi | 1000m | 512Mi | 1 |
 | `cass-operator` | 200m | 64Mi | 1000m | 256Mi | 1 |
 | `k8ssandra-operator` | 100m | 64Mi | 1000m | 256Mi | 1 |
-| `mission-control-ui` | 100m | 256Mi | — | — | 2 (HA) |
-| `dex` | 50m | 128Mi | — | — | 2 (HA) |
-| `medusa` (sidecar, per node) | 100m | 256Mi | — | — | 1 per DB pod |
-| `reaper` (per cluster) | 200m | 512Mi | — | — | 1 |
-| `stargate` | 500m | 1Gi | — | — | 2 (HA) |
-| `vector` (sidecar, per pod) | 50m | 128Mi | — | — | 1 per DB pod |
-| `cqlsh` pod | 100m | 256Mi | — | — | on-demand |
-| `cert-manager` | 10m | 32Mi | — | — | 1 |
+| `kube-state-metrics` | 10m | 64Mi | 200m | 128Mi | 1 |
+| `mission-control-ui` | 100m | 256Mi | 1000m | 512Mi | 2 (HA) |
+| `dex` | 50m | 128Mi | 500m | 256Mi | 2 (HA) |
+| `medusa` (sidecar, per node) | 100m | 256Mi | 1000m | 512Mi | 1 per DB pod |
+| `reaper` (per cluster) | 200m | 512Mi | 1000m | 1Gi | 1 |
+| `stargate` | 500m | 1Gi | 2000m | 2Gi | 2 (HA) |
+| `vector` (sidecar, per pod) | 50m | 128Mi | 500m | 256Mi | 1 per DB pod |
+| `cqlsh` pod | 100m | 256Mi | 500m | 512Mi | on-demand |
+| `cert-manager` | 10m | 32Mi | 100m | 128Mi | 1 |
 
 > ℹ️ The UI and Dex should run 2 replicas for high availability of the control plane dashboard and authentication.
+> ℹ️ `kube-state-metrics` TLS was enabled in MC 1.21.0 (security fix #2808).
 
 ### Configure resource overrides in values.yaml
 
@@ -54,19 +56,24 @@ MC ships with the following default Prometheus alerts (all operate on Cassandra/
 
 | Alert | Threshold | Severity | Description |
 |-------|-----------|---------|-------------|
-| Node Down (warning) | >10 min | warning | A Cassandra node has been down for more than 10 minutes |
-| Node Down (error) | >30 min | error | A Cassandra node has been down for more than 30 minutes |
-| Nodes Down Across Racks | Multi-rack | error | Nodes down across multiple racks — LOCAL_QUORUM at risk |
-| High CPU | >80% for 5 min | warning | Average CPU usage exceeds 80% for 5 consecutive minutes |
-| Disk Usage (warning) | >50% | warning | Data volume disk usage exceeds 50% |
-| Disk Usage (error) | >75% | error | Data volume disk usage exceeds 75% — urgent: add capacity |
-| High Load Average (warning) | >20 | warning | 1-minute load average exceeds 20 |
-| High Load Average (error) | >32 | error | 1-minute load average exceeds 32 |
-| Dropped Messages | Any | warning | Cassandra has dropped messages (queue overload indicator) |
+| Node Down | >10 min | Sev 2 - Warning | A Cassandra node has been down for more than 10 minutes |
+| Node Down | >30 min | Sev 1 - Error | A Cassandra node has been down for more than 30 minutes |
+| Nodes Down Across Racks | Multi-rack | — | Nodes down across rack boundaries — LOCAL_QUORUM CL errors at risk |
+| High CPU | >80% for 5 min | — | Average CPU usage exceeds 80% for 5 consecutive minutes |
+| Disk Usage | >50% for 1 min | Sev 2 - Warning | Expand cluster before cleanups become impossible due to low disk |
+| Disk Usage | >75% for 1 min | Sev 1 - Error | Urgent: expand cluster before cleanups become impossible |
+| High Load Average | >20 for 5 min | Sev 2 - Warning | Performance issue indicator; root cause can vary |
+| High Load Average | >32 for 5 min | Sev 1 - Error | Severe performance issue; immediate action required |
+| Dropped Messages | ≥10,000 over 5 min | Sev 1 - Error | Thread pools cannot keep up; incorrect replicas possible |
+| Dropped Messages | <10,000 over 5 min | Sev 2 - Warning | Thread pool pressure; monitor closely |
 
 > ℹ️ Since MC v1.15, default and custom alerting rules are separated into distinct ConfigMaps. Default rules are managed by MC; custom rules live in a separate ConfigMap you manage.
 
+> ℹ️ **MC 1.21.0 fix:** Alertmanager configuration updates are now correctly pushed to the Mimir API. The Mimir Alertmanager datasource is automatically added to Grafana and activated. If you were on 1.20.x and alert routing was silently failing, upgrading to 1.21.0 resolves this.
+
 ### Configure Slack webhook notifications
+
+The MC UI supports Slack alert recipients directly (UI → Alerts → Alert Settings → Notifications → Add Recipient). For advanced routing via `values.yaml`:
 
 ```yaml
 # In values.yaml — route alerts to a Slack channel
@@ -505,6 +512,28 @@ MC collects logs from all Cassandra, HCD, and platform pods into Loki. Access vi
    # Logs from a specific pod
    {pod="production-hcd-dc1-r1-sts-0", namespace="my-project"}
    ```
+
+---
+
+## 9. Observability Component Versions (1.21.0)
+
+📖 Source: https://docs.datastax.com/en/mission-control/release-notes/release-notes.html
+
+| Component | Version in 1.21.0 | Notes |
+|-----------|------------------|-------|
+| Grafana | 12.4.9 | Upgraded from 12.4.5 |
+| Mimir | 3.1.5 | Upgraded from 2.17.11; TLS enabled in gossip ring |
+| Loki | 3.6.11 | TLS enabled in gossip ring |
+| Vector | 0.56.0-distroless-libc | Unchanged from 1.20.2 |
+| kube-state-metrics | 2.20.0 (chart 8.4.2) | TLS enabled; upgraded from 2.19.1 |
+
+**1.21.0 observability changes:**
+- **Grafana**: Upgraded to 12.4.9.
+- **Mimir**: Upgraded to 3.1.5 (CVE fixes). TLS enabled in Mimir gossip ring.
+- **Loki**: TLS enabled in Loki gossip ring.
+- **kube-state-metrics**: TLS enabled; YAML indentation bug fixed (previously prevented kube-state-metrics config from taking effect).
+- **Alertmanager**: Fixed — Alertmanager config updates now correctly pushed to the Mimir API. Mimir Alertmanager datasource added to Grafana with auto-activation.
+- **Total Hints panel**: Updated to display recent rate instead of cumulative value.
 
 ---
 

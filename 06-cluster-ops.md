@@ -1,21 +1,26 @@
 # 06 — Cluster Operations: Deploy HCD, Multi-Region, Backup/Restore, Upgrades, Migration, Day-2
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/configure-multi-region.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/backup.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/restore.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/mc/upgrade-mc-helm.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/data-plane/storage-classes.html  
-📖 Source: https://docs.datastax.com/en/mission-control/reference/workload-pinning.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/canary-deployments.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/per-node-configuration.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/replace-db-node.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/rebuild-failed-datacenter.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/add-db-nodes.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/remove-db-nodes.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/remove-db-datacenter.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/config-nosql.html  
-📖 Source: https://docs.datastax.com/en/mission-control/administration/data-plane/configure-hcd-guardrails.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/configure-multi-region.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/backup.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/restore.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/backup-restore-compatibility.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/mc/upgrade-mc-helm.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/data-plane/storage-classes.html
+📖 Source: https://docs.datastax.com/en/mission-control/reference/workload-pinning.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/canary-deployments.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/per-node-configuration.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/replace-db-node.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/rebuild-failed-datacenter.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/add-db-nodes.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/remove-db-nodes.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/remove-db-datacenter.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/config-nosql.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/data-plane/configure-hcd-guardrails.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/rolling-restart.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/upgrade-sstables.html
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/upgrade-nosql-cluster.html
 📖 Source: https://docs.datastax.com/en/mission-control/administration/interact-with-local-operators-during-failure.html
+📖 Source: https://docs.datastax.com/en/mission-control/migrate/oss-cass-to-mission-control.html
 
 ---
 
@@ -81,7 +86,7 @@ spec:
     auth: true                      # keep true — default superuser created automatically
     cassandra:
       serverType: hcd
-      serverVersion: "2.0.6"        # check release notes for latest
+      serverVersion: "2.0.8"        # check release notes for latest
       resources:
         requests:
           cpu: "4"
@@ -289,7 +294,7 @@ spec:
             cassandraYaml:
               read_request_timeout_in_ms: 15000
               # Or for version canary:
-          # serverVersion: "2.0.6"   # upgrade dc1 only first
+          # serverVersion: "2.0.8"   # upgrade dc1 only first
         - metadata:
             name: dc2                 # other DCs remain at cluster-level settings
 ```
@@ -307,7 +312,7 @@ kubectl get pods -n my-project -w
 spec:
   k8ssandra:
     cassandra:
-      serverVersion: "2.0.6"          # promote version upgrade cluster-wide
+      serverVersion: "2.0.8"          # promote version upgrade cluster-wide
       config:
         cassandraYaml:
           read_request_timeout_in_ms: 15000
@@ -319,6 +324,173 @@ spec:
 ```
 
 > ⚠️ When you promote to cluster level, MC operators detect that `dc1` already has the config applied and **skip it**. Expect ~14 minutes per remaining datacenter for the rolling change.
+
+---
+
+## 5A. Rolling Restart
+
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/rolling-restart.html
+
+Restart all nodes in a cluster in a rolling fashion with zero downtime. Use after adding or terminating nodes, or to apply configuration changes that require a restart.
+
+Mission Control iterates one rack at a time, restarting pods one at a time within each rack. Starting with v1.18.0, parallel rack restarts are supported for faster operations.
+
+> ℹ️ A rolling restart has no significant impact on performance or stability as long as the replication factor (RF) is 3 or higher. With RF ≥ 3, one node can be down while maintaining quorum reads and writes.
+
+### Via the UI
+
+1. In MC UI → **Home → Clusters**, click your cluster namespace.
+2. In the **Nodes** section of the **Overview** tab, select the target datacenter row checkbox.
+3. Click ⋮ **More Options** → **Restart**.
+4. To restart all DCs simultaneously: select the **Name** checkbox (selects all DCs) → **Bulk Actions** → confirm **Action type: Restart** → **Run**.
+
+### Via `kubectl` — CassandraTask (single DC)
+
+```yaml
+# restart-task.yaml
+apiVersion: control.k8ssandra.io/v1alpha1
+kind: CassandraTask
+metadata:
+  name: restart-dc1
+spec:
+  datacenter:
+    name: dc1
+    namespace: my-project
+  jobs:
+    - name: restart-dc1
+      command: restart
+```
+
+```bash
+kubectl apply -f restart-task.yaml
+# Monitor status
+kubectl get cassandratask restart-dc1 | yq .status
+```
+
+> ℹ️ `CassandraTask` targets one datacenter. Use `K8ssandraTask` to restart multiple DCs in a single manifest.
+
+### Via `kubectl` — K8ssandraTask (multiple DCs)
+
+```yaml
+# restart-multi.yaml
+apiVersion: control.k8ssandra.io/v1alpha1
+kind: K8ssandraTask
+metadata:
+  name: restart-dc
+spec:
+  cluster:
+    name: production-hcd
+    namespace: my-project
+  datacenters:
+    - dc1
+    - dc2
+  jobs:
+    - name: restart-dcs
+      command: restart
+```
+
+```bash
+kubectl apply -f restart-multi.yaml
+kubectl get k8ssandratask restart-dc | yq .status
+```
+
+> ⚠️ Submit the task object to the Kubernetes cluster where the specified datacenter is deployed.
+
+### Parallel rack restarts (v1.18.0+)
+
+By default, nodes restart sequentially within each rack. Set `maxConcurrentPods: 0` (all nodes in a rack restart at once) or a positive integer (limit concurrency) to speed up the operation.
+
+```yaml
+spec:
+  cluster:
+    name: production-hcd
+    namespace: my-project
+  datacenters:
+    - dc1
+  maxConcurrentPods: 0    # 0 = restart all pods in the rack simultaneously
+  jobs:
+    - name: restart-dc1
+      command: restart
+```
+
+> ⚠️ Parallel restarts temporarily reduce availability within the affected rack. Ensure RF ≥ 3 before enabling.
+
+### Restart a specific rack only (during CP outage)
+
+```yaml
+spec:
+  datacenter:
+    name: dc1
+    namespace: my-project
+  jobs:
+    - name: restart-rack1
+      command: restart
+      args:
+        - rack: rack1
+```
+
+---
+
+## 5B. Upgrade SSTables
+
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/upgrade-sstables.html
+
+Run this after a server version upgrade or when changing compression options. If SSTables are already at the current version, the command returns immediately with no action.
+
+Mission Control iterates one rack at a time and triggers `nodetool upgradesstables` on one pod at a time. It reports task progress and status.
+
+> ⚠️ **Performance note**: During an SSTable upgrade, additional disk pressure occurs while SSTables are rewritten (if required). Read performance improves after the format upgrade is complete.
+
+### Via the UI
+
+1. MC UI → **Home → Clusters** → your cluster namespace.
+2. In the **Nodes** section of the **Overview** tab, select the target DC checkbox.
+3. Click ⋮ **More Options** → **Upgrade sstables**.
+4. For all DCs: select the **Name** checkbox → **Bulk Actions** → **Action type: Upgrade sstables** → **Run**.
+
+### Via `kubectl`
+
+```yaml
+# upgradesstables-dc1.yaml
+apiVersion: control.k8ssandra.io/v1alpha1
+kind: CassandraTask
+metadata:
+  name: upgradesstables-dc1
+spec:
+  datacenter:
+    name: dc1
+    namespace: my-project          # adjust to your namespace
+  jobs:
+    - name: upgradesstables-dc1
+      command: upgradesstables
+      args:
+        keyspace_name: my_keyspace  # optional — omit to upgrade ALL keyspaces
+```
+
+```bash
+# Submit to the Kubernetes cluster where the data plane and datacenter are deployed.
+# The namespace (-n) MUST be mission-control.
+kubectl apply -f upgradesstables-dc1.yaml -n mission-control
+
+# Monitor status
+kubectl get cassandratask upgradesstables-dc1 | yq .status
+```
+
+**Key options:**
+- `spec.jobs[0].command`: must be `upgradesstables`
+- `spec.jobs[0].args.keyspace_name`: restrict to one keyspace; omit to upgrade all keyspaces
+
+**Status output example** (task complete, 3 nodes upgraded):
+
+```yaml
+status:
+  completionTime: "2025-08-28T18:07:08Z"
+  conditions:
+    - status: "True"
+      type: Complete
+  startTime: "2025-08-28T18:06:57Z"
+  succeeded: 3
+```
 
 ---
 
@@ -425,34 +597,78 @@ spec:
 
 📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/remove-db-datacenter.html
 
-> ⚠️ MC **blocks termination** if any user keyspace still references the datacenter in its replication settings. You **must** run ALTER KEYSPACE first.
+> ⚠️ MC **blocks termination** if any user keyspace still references the datacenter in its replication settings. You **must** remove ALL references from ALL user-defined keyspaces before removing the DC from the `MissionControlCluster` spec.
+
+### Termination order (multi-DC / multi-cluster deployments)
+
+To avoid cluster-wide downtime and instability, follow this order:
+
+1. **One cluster at a time**: For multi-cluster deployments, terminate datacenters from one cluster before moving to the next.
+2. **One datacenter at a time**: Terminate only one DC at a time within a cluster.
+3. **DSE workload order** (DSE clusters only):
+   - First: Analytics datacenters
+   - Then: Cassandra (transactional) and Graph datacenters
+   - Last: Search datacenters
+   - For mixed workloads, assign priority by the highest-ranking workload in that DC (e.g., a SearchAnalytics DC is terminated before a Graph DC).
+
+### Procedure
 
 ```sql
--- Step 1: For each user keyspace, remove the DC from replication
+-- Step 1: For EVERY user keyspace, remove the DC from replication.
+-- You must wait until active keyspaces become dormant before altering.
 ALTER KEYSPACE my_keyspace WITH REPLICATION = {
   'class': 'NetworkTopologyStrategy',
-  'dc1': 3    -- remove dc2 from this list
+  'dc1': 3    -- remove dc2 from this map
 };
 
--- Repeat for all user keyspaces
--- System keyspaces: MC handles these automatically
+-- Repeat for ALL user-defined keyspaces.
+-- System keyspaces (system_traces, system_distributed, system_auth,
+-- dse_leases, dse_perf, dse_security): MC operators update these automatically.
 ```
 
 ```yaml
-# Step 2: Remove the datacenter from MissionControlCluster
+# Step 2: Remove the datacenter entry from MissionControlCluster
 spec:
   k8ssandra:
     cassandra:
       datacenters:
         - metadata:
             name: dc1              # keep dc1
-        # dc2 removed from list
+        # dc2 entry deleted from list
 ```
 
 ```bash
 kubectl apply -f hcd-cluster.yaml
-# MC will verify no user keyspaces reference dc2, then decommission and delete it
-kubectl get CassandraDatacenter -n my-project   # dc2 should disappear
+# MC verifies no user keyspaces reference dc2, then decommissions and deletes it.
+```
+
+### Monitor termination progress
+
+```bash
+# Check overall cluster status (shows ERROR column if blocked)
+kubectl get k8ssandracluster CLUSTER_NAME
+
+# Watch the datacenter-level status
+kubectl get cassandradatacenter dc2 -n my-project -o yaml
+# Termination is complete when all Decommission conditions.status are "False"
+
+# Watch node logs during decommission
+kubectl logs CLUSTER-dc2-rack1-sts-0 -c server-system-logger
+```
+
+### Error: keyspace still has replicas
+
+If you see:
+
+```
+NAME    ERROR
+demo    cannot decommission DC dc2: keyspace ks1 still has replicas on it
+```
+
+Run `ALTER KEYSPACE` for the offending keyspace (e.g., `ks1`) to remove the DC reference, then re-apply the `MissionControlCluster` manifest.
+
+```sql
+ALTER KEYSPACE ks1 WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': 3};
 ```
 
 ---
@@ -724,6 +940,93 @@ kubectl describe MedusaRestoreJob restore-20250901 -n my-project
 
 ---
 
+## 11A. Backup/Restore Compatibility
+
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/backup-restore-compatibility.html
+
+### Backup types
+
+**Full backup**: Captures all data at a specific point in time. Self-contained and independent of previous backups. Use for cross-version migrations or maximum restore flexibility.
+
+**Differential backup**: Captures only data changed since the last full backup. More storage-efficient, but requires the base full backup to restore.
+
+> ℹ️ When you trigger a differential backup, MC creates a *synthetic full backup* by merging the last full backup with all incremental changes. The immutable-file nature of SSTables makes this optimization possible.
+
+### Version compatibility matrix
+
+Same-version restores always work without additional steps. When restoring to a later version, you must run **Upgrade SSTables** (Section 5B) after the restore completes. Downgrades are **not supported**.
+
+| Source version | Target version | Supported | Notes |
+|---|---|---|---|
+| Cassandra 3.11.x | Cassandra 3.11.x | ✅ Yes | Same version |
+| Cassandra 3.11.x | Cassandra 4.0.x | ✅ Yes | Upgrade SSTables after restore |
+| Cassandra 3.11.x | Cassandra 4.1.x | ✅ Yes | Upgrade SSTables after restore |
+| Cassandra 4.0.x | Cassandra 4.0.x | ✅ Yes | Same version |
+| Cassandra 4.0.x | Cassandra 4.1.x | ✅ Yes | Later minor version |
+| Cassandra 4.0.x | HCD | ✅ Yes | Restore Cassandra 4.x backups to HCD |
+| Cassandra 4.1.x | Cassandra 4.0.x | ❌ No | No downgrades |
+| Cassandra 4.1.x | HCD | ✅ Yes | Restore Cassandra 4.x backups to HCD |
+| Cassandra 4.x.x | Cassandra 3.11.x | ❌ No | No downgrades |
+| DSE 6.8.x | DSE 6.8.x | ✅ Yes | Same version |
+| DSE 6.8.x | DSE 6.9.x | ✅ Yes | Upgrade SSTables after restore |
+| DSE 6.8.x | HCD | ✅ Yes | Validate schema during migration |
+| DSE 6.9.x | DSE 6.9.x | ✅ Yes | Same version |
+| DSE 6.9.x | HCD | ✅ Yes | Validate schema during migration |
+| HCD 1.x | HCD 1.x | ✅ Yes | Same version |
+| HCD 1.x | HCD 2.x | ✅ Yes | Upgrade SSTables after restore |
+| HCD 2.x | HCD 2.x | ✅ Yes | Same version |
+
+### SSTable upgrade after restore to a later version
+
+When restoring to a newer major version with a different SSTable format, upgrade SSTables after the restore:
+
+```yaml
+apiVersion: control.k8ssandra.io/v1alpha1
+kind: CassandraTask
+metadata:
+  name: upgrade-sstables
+spec:
+  datacenter:
+    name: dc1
+  jobs:
+    - name: upgradesstables
+      command: upgradesstables
+```
+
+See **Section 5B** for the full procedure and status monitoring.
+
+### Limitations
+
+- Restoring to a newer **major** version requires SSTable upgrades.
+- When restoring a DSE backup to a Cassandra or HCD cluster, DSE-specific features may not be available in the target cluster.
+- **Materialized views** may need to be rebuilt after restore.
+- If the source cluster used **custom compaction strategies**, the same strategies must be available in the target cluster before restore.
+- **Time-series data with TTL** may expire during long restore operations.
+
+### Schema and topology notes
+
+- Backups capture schema along with data. Restoring reverts the schema to the backup point — columns dropped after the backup reappear; columns added after the backup do not appear.
+- Reapply any schema changes (DDL) made after the backup was taken.
+- Secondary indexes restore automatically; custom indexes require the same implementation in the target cluster.
+- You can restore to a cluster with a different number of nodes, DCs, or rack topology. MC recalculates token ranges and handles rack assignment automatically.
+- For multi-DC clusters, restore each DC's backup independently and verify schema consistency across all DCs.
+
+### Security considerations
+
+- **TDE-encrypted backups**: Require the same encryption keys for restore. Store keys securely, separate from backups.
+- **Authentication and roles are NOT backed up**: After restore, manually re-create users and roles, reconfigure external auth providers, and verify user access.
+
+### Post-restore checklist
+
+1. Run `nodetool repair` for data consistency.
+2. Run **Upgrade SSTables** (Section 5B) if restoring to a newer version.
+3. Verify data integrity.
+4. Re-create security settings (users, roles, external auth).
+5. Update application connection strings if the cluster topology changed.
+6. Adjust replication settings if the DC topology changed.
+
+---
+
 ## 12. Multi-Region Deployment
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/configure-multi-region.html
@@ -839,7 +1142,7 @@ spec:
     auth: true
     cassandra:
       serverType: hcd
-      serverVersion: "2.0.6"
+      serverVersion: "2.0.8"
       datacenters:
         - metadata:
             name: dc-us-east
@@ -892,19 +1195,38 @@ helm upgrade mc-release \
 
 ## 14. Upgrade HCD/DSE Cluster Version (Rolling, Zero-Downtime)
 
+📖 Source: https://docs.datastax.com/en/mission-control/administration/control-plane/upgrade-nosql-cluster.html
+
+You can upgrade a DSE or HCD cluster with zero downtime by updating `serverVersion` in the `MissionControlCluster` manifest.
+
+**Operator workflow:**
+1. Cluster-level operator detects the version change and modifies each `CassandraDatacenter`, one at a time (for multi-DC clusters).
+2. Datacenter-level operator processes each rack sequentially: modifies rack resource → terminates the instance → bootstraps a replacement node.
+3. After upgrade completes, follow the **Upgrade SSTables** steps (Section 5B) if the new version uses a different SSTable format.
+
+```yaml
+# demo.yaml — change serverVersion only; other spec fields unchanged
+apiVersion: missioncontrol.datastax.com/v1beta2
+kind: MissionControlCluster
+metadata:
+  name: production-hcd
+spec:
+  k8ssandra:
+    cassandra:
+      serverVersion: "2.0.8"   # was "2.0.5"
+```
+
 ```bash
-# Edit serverVersion in MissionControlCluster spec
-kubectl edit MissionControlCluster production-hcd -n my-project
-# Change: serverVersion: "2.0.5" → "2.0.6"
+kubectl apply -f demo.yaml
 
-# Or via canary pattern (recommended):
-# 1. Apply at DC level only → validate → promote to cluster level
-# See Section 5 (Canary Deployments) above
-
-# Monitor rolling upgrade
-kubectl get cassandradatacenter dc1 -n my-project -o yaml | grep cassandraOperatorProgress
+# Monitor upgrade progress from the data plane cluster
+kubectl get cassandradatacenter dc1 -o yaml
+# cassandraOperatorProgress: Updating → watch conditions.type: Updating
+# When complete, cass-operator sets conditions.status to False for Updating
 kubectl get pods -n my-project -w
 ```
+
+> ℹ️ Upgrades follow the same rolling process as config-change deployments. Use the canary pattern (Section 5) to validate a version change on one DC before promoting cluster-wide.
 
 ---
 
@@ -913,21 +1235,46 @@ kubectl get pods -n my-project -w
 📖 Source: https://docs.datastax.com/en/mission-control/administration/interact-with-local-operators-during-failure.html
 
 **When the Mission Control control plane is unavailable:**
-- ✅ Scheduled backups **continue** running (Medusa runs inside each pod, not through CP)
-- ❌ Repairs do **NOT** run (Reaper is managed by CP)
-- ✅ You can manage the data plane directly via `kubectl` against the DP cluster
+- ✅ Scheduled backups **continue** running — Medusa runs inside each data-plane pod and executes independently of the CP.
+- ❌ Repairs do **NOT** run by default — Reaper availability depends on your deployment. If Reaper is deployed only in the CP, repairs are unavailable. If Reaper is deployed in a data-plane datacenter (first DC with data nodes), repairs can still run in that DC.
+- ❌ Multi-datacenter operations are unavailable.
+- ✅ `cass-operator` continues managing individual datacenters in the data plane — you can interact with it directly.
+- ❌ `K8ssandraCluster`-level operations are unavailable (the system ignores changes to `K8ssandraCluster` objects while CP is down).
+
+> ⚠️ **Prerequisites before making changes**: have a backup of your current cluster configuration. Document all manual changes made during the outage so you can reconcile them when CP recovers.
+
+### Verify control plane availability
+
+```bash
+kubectl cluster-info
+# Expected when CP is down:
+# Unable to connect to the server: dial tcp SERVER_IP:8443: i/o timeout
+```
 
 ### Switch kubectl context to the data plane
 
 ```bash
-kubectl config use-context DP_WEST    # or CP_EAST if CP is down but DP context is different
+# List available contexts
+kubectl config get-contexts
+
+# Switch to data plane
+kubectl config use-context DATA_PLANE_CLUSTER_NAME
 ```
 
-### Directly edit CassandraDatacenter
+### View and modify CassandraDatacenter
 
 ```bash
-kubectl edit CassandraDatacenter dc1 -n my-project
-# Make your changes directly — cass-operator (running on the DP) will apply them
+# List all CassandraDatacenter resources
+kubectl get cassandradatacenter -A
+
+# View details
+kubectl describe cassandradatacenter dc1 -n my-project
+
+# Edit directly — cass-operator (running on the DP) will apply changes
+kubectl edit cassandradatacenter dc1 -n my-project
+
+# Or apply a YAML file
+kubectl apply -f datacenter.yaml
 ```
 
 ### CassandraTask commands available during CP outage
@@ -939,6 +1286,7 @@ All `CassandraTask` operations are handled by `cass-operator` on the data plane 
 | `restart` | Rolling restart of all pods in the DC |
 | `cleanup` | Remove data not belonging to this node (after topology change) |
 | `rebuild` | Stream data from a source DC |
+| `replacenode` | Replace a failed node |
 | `upgradesstables` | Upgrade SSTables to current version |
 | `compaction` | Run a major compaction |
 | `scrub` | Scrub SSTables (checks for corruption) |
@@ -947,30 +1295,66 @@ All `CassandraTask` operations are handled by `cass-operator` on the data plane 
 | `garbagecollect` | Remove deleted data from SSTables |
 | `refresh` | Load new SSTables from disk (after manual copy) |
 
+### Trigger a rolling restart during CP outage
+
+```yaml
+# restart-task.yaml
+apiVersion: control.k8ssandra.io/v1alpha1
+kind: CassandraTask
+metadata:
+  name: restart-task
+spec:
+  datacenter:
+    name: dc1
+    namespace: cass-operator
+  jobs:
+    - name: restart-dc1
+      command: restart
+```
+
+```bash
+kubectl apply -f restart-task.yaml
+```
+
+To restart a specific rack only, add an `args` entry to the job:
+
+```yaml
+      args:
+        - rack: rack1
+```
+
 ### Control CP recovery behavior with annotation
 
 ```bash
-# Allow CP to overwrite any local changes you made during the outage (default on recovery)
+# Allow CP to overwrite local changes on recovery (default)
 kubectl annotate CassandraDatacenter dc1 -n my-project \
   cassandra.datastax.com/autoupdate-spec=always
 
-# Allow CP to overwrite only once (then annotation is removed)
+# Allow CP to overwrite only once (annotation is then removed)
 kubectl annotate CassandraDatacenter dc1 -n my-project \
   cassandra.datastax.com/autoupdate-spec=once
 
-# Prevent CP from overwriting your local changes on recovery (use with care)
-# Simply remove the annotation or set to a non-matching value
+# Prevent CP from overwriting local changes on recovery
 kubectl annotate CassandraDatacenter dc1 -n my-project \
-  cassandra.datastax.com/autoupdate-spec-  # remove annotation
+  cassandra.datastax.com/autoupdate-spec-   # removes annotation
 ```
 
-> ⚠️ If you make local DP changes during a CP outage and do NOT want them overwritten when CP recovers, remove the `autoupdate-spec` annotation. By default (`always`), CP will overwrite local changes on reconnect.
+> ⚠️ Direct changes to a `CassandraDatacenter` remain active until either a new version is created on the CP, or the `cassandra.datastax.com/autoupdate-spec` annotation (`always` or `once`) explicitly allows overwriting. Document all manual changes made during the outage.
+
+### Recovery checklist (after CP is restored)
+
+1. Verify CP connectivity: `kubectl cluster-info`
+2. Review any changes made during the outage.
+3. Synchronize configurations if needed (update the `MissionControlCluster` manifest to match manual changes, or let `autoupdate-spec=always` reconcile automatically).
+4. Test cluster functionality via `nodetool status`.
+5. Update documentation with any permanent changes.
 
 ---
 
 ## 16. Migrate Existing Clusters to Mission Control
 
 📖 Source: https://docs.datastax.com/en/mission-control/migrate/migration-overview.html
+📖 Source: https://docs.datastax.com/en/mission-control/migrate/oss-cass-to-mission-control.html
 
 > **Which migration path do you need?**
 >
@@ -1022,6 +1406,8 @@ kubectl apply -f migration-cluster.yaml
 
 📖 Source: https://docs.datastax.com/en/mission-control/migrate/oss-cass-to-mission-control.html
 
+> ℹ️ After migration, there are several users created automatically in new MC-managed clusters (superuser, Medusa, Reaper). If the cluster already existed before MC, you must manually re-create the Medusa and Reaper roles. See the OSS Cassandra migration guide for the full re-create procedure.
+
 ---
 
 ## 17. Day-2 Operations Quick Reference
@@ -1057,5 +1443,6 @@ spec:
 - Azure Arc install: https://docs.datastax.com/en/mission-control/integrations/hcd-azure-arc.html
 - Cluster best practices: https://docs.datastax.com/en/mission-control/reference/cluster-best-practices.html
 - Upgrade RBAC: https://docs.datastax.com/en/mission-control/administration/mc/helm-upgrade-rbac.html
-- CRD reference: https://docs.datastax.com/en/mission-control/crd-reference/crd-reference-overview.html
+- **CRD reference** (pick the page version matching your installed release, e.g. `missioncontrolcluster-v1.21.0`, `backup-v1.21.0`, `k8ssandratask-v1.21.0`): https://docs.datastax.com/en/mission-control/crd-reference/crd-reference-overview.html
 - Service accounts reference: https://docs.datastax.com/en/mission-control/reference/service-accounts.html
+- **CQL gateway / CqlConnectivity / cqlsh console**: see `10-cql-access.md`

@@ -406,7 +406,14 @@ kubectl get deployment RELEASE_NAME -n K8SSANDRA_NAMESPACE \
   -o jsonpath='{.spec.template.spec.containers[0].image}'
 ```
 
-Review the Mission Control release notes for `cass-operator` version compatibility:  
+Mission Control bundles specific operator versions per release. As of **MC 1.21.0**:
+
+| Operator | Bundled version |
+|----------|----------------|
+| `k8ssandra-operator` | 1.33.0 |
+| `cass-operator` | 1.32.3 |
+
+Review the Mission Control release notes for the operator version included in your target release:
 📖 https://docs.datastax.com/en/mission-control/release-notes/release-notes.html
 
 ---

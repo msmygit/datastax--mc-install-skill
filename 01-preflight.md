@@ -1,13 +1,15 @@
-# 01 — Pre-Flight: Entitlement, Hardware, Software, Node Labels, Networking & Storage
+# 01 — Pre-Flight: Entitlement, Hardware, Software, Node Labels, Networking, Storage & Service Accounts
 
 Every item in this file must be verified **before** running `helm install`.
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/installation-requirements.html  
 📖 Source: https://docs.datastax.com/en/mission-control/install/kubernetes.html  
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html  
-📖 Source: https://docs.datastax.com/en/mission-control/misc/supported-platforms.html
+📖 Source: https://docs.datastax.com/en/mission-control/misc/supported-platforms.html  
+📖 Source: https://docs.datastax.com/en/mission-control/reference/service-accounts.html  
+📖 Source: https://docs.datastax.com/en/mission-control/reference/platform-components.html
 
-> ⚠️ Replicated/KOTS is no longer a supported install method (deprecated 1.20.1, removed thereafter). All installs — online and air-gapped — use Helm from the IBM Container Registry (ICR). Existing Replicated installs migrate in place; see `02-install-online.md`.  
+> ⚠️ Replicated/KOTS is no longer a supported install method (support removed in 1.20.1). All installs — online and air-gapped — use Helm from the IBM Container Registry (ICR). Existing Replicated installs migrate in place; see `02-install-online.md`.  
 > 📖 https://docs.datastax.com/en/mission-control/install/migrate-replicated-to-icr.html
 
 ---
@@ -29,7 +31,7 @@ A valid IBM entitlement key is required before any installation can proceed. Unl
 - Running OSS Cassandra nodes **in addition to** HCD/DSE nodes carries an additional cost; HCD/DSE nodes themselves are included in the license
 
 ### Air-gapped entitlement
-- The same IBM entitlement key is used for air-gapped installs — it authenticates against `cp.icr.io` when you mirror entitled images (`hcd`, `dse-mgmtapi`, `cql-router`, `cqlsh-pod`) to your private registry with Skopeo
+- The same IBM entitlement key is used for air-gapped installs — it authenticates against `cp.icr.io` when syncing images using Hauler (see `03-install-airgap.md`)
 - Regenerate the key at https://myibm.ibm.com/products-services/containerlibrary if it has expired or you receive container authorization errors
 - Public MC images (`mission-control`, `mission-control-ui`, `mission-control-dex`, `k8ssandra-client`) are served from the non-entitled `icr.io` registry and do **not** require the entitlement key
 
@@ -41,11 +43,15 @@ A valid IBM entitlement key is required before any installation can proceed. Unl
 
 | Component | Required | Notes |
 |-----------|----------|-------|
-| Kubernetes | **1.21.0+** | **Avoid 1.35.0–1.35.3**: `MaxUnavailableStatefulSet` feature flag causes StatefulSet failures |
+| Kubernetes | **1.21.0+** | **Avoid 1.35.0–1.35.3**: `MaxUnavailableStatefulSet` kubelet bug causes StatefulSet failures. Workaround: disable `MaxUnavailableStatefulSet` feature flag or upgrade to **1.35.4+** |
 | OpenShift | **4.8+** | Uses `oc` CLI; cert-manager installed from OperatorHub, not Helm |
-| Helm | **3.14.0–3.18.0** | This range is strict. Verify: `helm version --short`. 3.19+ is NOT supported. Must support OCI registries (built in since Helm 3.8). |
+| Helm | **3.14.0–3.18.0** | This range is strict. Verify: `helm version --short`. Helm 3.19+ is NOT supported. Must support OCI registries (built in since Helm 3.8). |
 | kubectl | 1.21+ | Required for install and all day-2 operations |
 | cert-manager | 1.16.1 (recommended) | Must be installed **before** MC |
+| mcctl CLI | Current MC release | Required for data plane registration (`mcctl register`) and CLI-based workflows |
+
+### Air-gap prerequisites
+- Hauler (cattle-ops/hauler), Docker/Podman, `mcctl`, `cert-manager`, private OCI registry, and 5–10 GB local disk space on the connected bastion host. See `03-install-airgap.md`.
 
 ### Verify Helm version before proceeding
 ```bash
@@ -114,7 +120,8 @@ kubectl get nodes --show-labels | grep mission-control
 
 ## 5. Networking Requirements
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/installation-requirements.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/installation-requirements.html  
+📖 Source: https://docs.datastax.com/en/mission-control/reference/in-cluster-app-comm.html
 
 ### Required ports (open between all hosts in a region)
 
@@ -122,12 +129,14 @@ Open TCP/UDP ports `1024–65535` between all hosts within a given control plane
 
 | Port | Instance type | Purpose |
 |------|--------------|---------|
-| `tcp:30880` | Platform + Database | UI service |
-| `tcp:30600` | Platform | Vector aggregator (log/metric shipping) |
+| `tcp:30880` | Platform + Database | UI service (NodePort default) |
+| `tcp:30600` | Platform | Vector aggregator NodePort (legacy data plane telemetry) |
+| `tcp:6000` / `tcp:6060` | Platform / Data Plane | Vector aggregator service (internal telemetry) |
+| `tcp:8443` | Platform | Observability internal TLS communication (Loki / Mimir) |
 | `tcp:9042` | Database | CQL native protocol (client connections) |
 | `tcp:7000` | Database | Cassandra internode (unencrypted) |
 | `tcp:7001` | Database | Cassandra internode (TLS encrypted) |
-| `tcp:8080` | Database | Management API |
+| `tcp:8080` | Database | Management API / Data API |
 
 ### Multi-cluster pod-to-pod routing (required for multi-region)
 
@@ -136,12 +145,12 @@ Database pods across clusters must reach each other on ports 7000/7001/8080.
 📖 Source: https://docs.datastax.com/en/mission-control/install/configure-multi-region.html
 
 Also open between control plane and data plane clusters:
-- `tcp:30600` — Vector aggregator (telemetry from DP to CP)
+- `tcp:443` or `tcp:30600` — Vector aggregator (telemetry from DP to CP: Ingress 443 recommended, NodePort 30600 legacy)
 - `tcp:443` or `tcp:6443` — Kubernetes API server (CP manages DP)
 
 ### Load balancing
-- Place the UI service (port 30880) behind a load balancer across all worker nodes for HA
-- **Do NOT** put a load balancer in front of database instances — Cassandra drivers handle client-side load balancing natively
+- Place the UI service behind a load balancer across all worker nodes for HA
+- **Do NOT** put a load balancer in front of database instances — Cassandra drivers handle client-side load balancing natively (for external CQL gateway access, see `10-cql-access.md`)
 
 ### Rancher-specific
 If running on Rancher, the bundled NGINX ingress controller has a **1 MB body size limit** that causes webhook failures. Fix:
@@ -205,7 +214,31 @@ kubectl patch storageclass gp2 \
 
 ---
 
-## 7. Required Kubernetes Privileges
+## 7. Service Accounts and RBAC Permissions
+
+📖 Source: https://docs.datastax.com/en/mission-control/reference/service-accounts.html
+
+Mission Control defines **11 Service Accounts** in the installation namespace (`mission-control`). Each account is granted least-privilege permissions via Kubernetes ClusterRoles:
+
+| Service Account | Name | Purpose | Primary Cluster Role |
+|-----------------|------|---------|----------------------|
+| **Agent** | `mission-control-agent` | Collects host-level metrics and logs | `mission-control-agent` |
+| **Aggregator** | `mission-control-aggregator` | Aggregates metrics and logs from deployed/managed resources | None (namespaced) |
+| **Cass operator** | `mission-control-cass-operator` | Handles lifecycle of Cassandra, DSE, and HCD logical datacenters | `mission-control-cass-operator` (+ leader role) |
+| **CRD upgrader** | `mission-control-crd-upgrader` | Handles upgrade of Mission Control CRDs | `mission-control-crd-upgrader` |
+| **Dex** | `mission-control-dex` | Routes authentication requests to identity providers (LDAP, OIDC) | `mission-control-dex` |
+| **K8ssandra operator** | `mission-control-k8ssandra-operator` | Handles lifecycle of K8ssandra resources (clusters, Reaper, Medusa) | `mission-control-k8ssandra-operator` (+ leader election role) |
+| **Kube state metrics** | `mission-control-kube-state-metrics` | Collects metrics from Kubernetes API server and Kubelet | `mission-control-kube-state-metrics` |
+| **Loki** | `loki` | Stores and indexes log data | `mission-control-loki-clusterrole` |
+| **Mimir** | `mission-control-mimir` | Stores and indexes metric data | None (namespaced) |
+| **MinIO SA** | `minio-sa` | Object storage provider (dev/testing) | None (namespaced) |
+| **Mission Control** | `mission-control` | Core platform management and orchestration | `mission-control-manager-role` |
+
+> ℹ️ On OpenShift, the `nonroot-v2` SCC is granted to 9 of these service accounts before installation (all except `mission-control-crd-upgrader` and `minio-sa`). See `02-install-online.md` and `05-security.md`.
+
+---
+
+## 8. Required Kubernetes Privileges for Installer
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/kubernetes.html
 
@@ -213,27 +246,28 @@ The account performing the installation must be able to:
 - Create and manage cluster-scoped resources (CRDs, ClusterRoles, ClusterRoleBindings)
 - Create namespaces
 - Manage PersistentVolumes and StorageClasses
-- Full cluster-admin is typically required for a first install (see `install-mc-helm-separate-cluster-resources` for splitting cluster-scoped resources from app-team installs)
+- Full cluster-admin is typically required for a first install (see `install-mc-helm-separate-cluster-resources` in `02-install-online.md` for splitting cluster-scoped resources from app-team installs)
 
 For least-privilege Helm upgrades (app team, no cluster-admin), see:  
 📖 https://docs.datastax.com/en/mission-control/administration/mc/helm-upgrade-rbac.html
 
 ---
 
-## 8. Pre-Flight Checklist Summary
+## 9. Pre-Flight Checklist Summary
 
 Run through every item before proceeding to installation:
 
 - [ ] IBMid registered and IBM entitlement key copied from https://myibm.ibm.com/products-services/containerlibrary
-- [ ] Kubernetes version confirmed: 1.21.0+ and NOT 1.35.0–1.35.3
+- [ ] Kubernetes version confirmed: 1.21.0+ (if 1.35.0–1.35.3, `MaxUnavailableStatefulSet` disabled or upgrade to 1.35.4+)
 - [ ] Helm version confirmed: 3.14.0–3.18.0
 - [ ] cert-manager planned (Helm chart for standard K8s; OperatorHub for OCP)
+- [ ] `mcctl` CLI available for registration and management
 - [ ] At least 2 platform nodes labeled `mission-control.datastax.com/role=platform`
 - [ ] At least 3 database nodes labeled `mission-control.datastax.com/role=database`
 - [ ] Two separate object storage buckets created (one for Mimir, one for Loki)
 - [ ] StorageClass with `volumeBindingMode: WaitForFirstConsumer` exists
 - [ ] For EKS: default StorageClass is set
-- [ ] Ports 7000, 7001, 8080, 9042, 30880, 30600 open between nodes
+- [ ] Ports 7000, 7001, 8080, 9042, 30880, 30600 (or Ingress 443) open between nodes/clusters
 - [ ] For multi-region: pod-to-pod routing planned (VPC Peering, VNet Peering, Submariner, etc.)
 - [ ] Release name chosen — must **not** contain the string `mission-control`
 

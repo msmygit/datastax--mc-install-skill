@@ -1,17 +1,19 @@
 # 02 — Online Installation: cert-manager, Helm (ICR), OpenShift, Separate Cluster Resources, Migrating from Replicated
 
 This file covers all **online** (internet-connected) installation paths.
-For air-gapped installs, see `03-install-airgap.md`.
+For air-gapped installs, see `03-install-airgap.md` (which uses Hauler).
 For cloud-specific `values.yaml` content (EKS/AKS/GKE/OCP), see `04-cloud-config.md`.
+For security context overrides and TLS configuration, see `05-security.md`.
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/choose-an-installation-method.html
-📖 Source: https://docs.datastax.com/en/mission-control/install/kubernetes.html
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-openshift.html
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm-separate-cluster-resources.html
-📖 Source: https://docs.datastax.com/en/mission-control/install/migrate-replicated-to-icr.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/choose-an-installation-method.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/kubernetes.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-openshift.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm-separate-cluster-resources.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/migrate-replicated-to-icr.html  
+📖 Source: https://docs.datastax.com/en/mission-control/install/security-overrides.html
 
-> ⚠️ **Replicated (KOTS) is no longer supported.** As of Mission Control 1.20.1, Replicated is deprecated, and KOTS support was removed entirely in later versions. Helm from the IBM Container Registry (ICR) is the only supported install method. If the user has an existing Replicated/KOTS install, go straight to [Migrate an existing Replicated installation to ICR](#migrate-an-existing-replicated-installation-to-icr) below — do **not** reinstall from scratch.
+> ⚠️ **Replicated (KOTS) is no longer supported.** Support for both KOTS and Replicated was removed in Mission Control 1.20.1. Helm from the IBM Container Registry (ICR) is the only supported install method. If the user has an existing Replicated/KOTS install, go straight to [Migrate an existing Replicated installation to ICR](#migrate-an-existing-replicated-installation-to-icr) below — do **not** reinstall from scratch.
 
 ---
 
@@ -75,7 +77,7 @@ For OCP environments (1.18.5+), cert-manager must come from the Red Hat OpenShif
 ```bash
 export MC_NAMESPACE=mission-control
 export MC_RELEASE_NAME=mc-release            # must NOT contain the string "mission-control"
-export MC_VERSION=v1.20.1                    # the MC Helm chart version to install
+export MC_VERSION=v1.21.0                    # current MC Helm chart version (e.g. v1.21.0)
 export PULL_SECRET_NAME=${MC_RELEASE_NAME}-registry   # default pull secret name pattern
 export ENTITLEMENT_KEY=YOUR_IBM_ENTITLEMENT_KEY
 export IBM_EMAIL=you@example.com
@@ -89,7 +91,7 @@ kubectl create namespace $MC_NAMESPACE
 kubectl get namespace $MC_NAMESPACE
 
 # Confirm Kubernetes version and node labels (see 01-preflight.md)
-kubectl version --short
+kubectl version
 kubectl get nodes --show-labels | grep mission-control
 
 # Confirm StorageClass has WaitForFirstConsumer
@@ -218,7 +220,7 @@ kubectl get pods -n $MC_NAMESPACE -w
 helm status $MC_RELEASE_NAME -n $MC_NAMESPACE
 ```
 
-> ⚠️ **Release name must NOT contain `mission-control`** — this causes internal naming conflicts. Use `mc-release`, `mc-prod`, etc.
+> ⚠️ **Release name must NOT contain `mission-control`** — this causes internal naming conflicts. Use `mc-release`, `mc-prod`, etc.  
 > ⚠️ **Data plane release name must exactly match the control plane release name.**
 
 ### Post-install: access the UI
@@ -227,7 +229,7 @@ helm status $MC_RELEASE_NAME -n $MC_NAMESPACE
 # Navigate to: https://NODE_IP:30880
 
 # Option 2: Port-forward (dev/test)
-kubectl port-forward svc/mc-release-mission-control-ui 8443:443 -n mission-control
+kubectl port-forward svc/${MC_RELEASE_NAME}-mission-control-ui 8443:443 -n $MC_NAMESPACE
 # Navigate to: https://localhost:8443
 
 # Option 3: Ingress (production) — configure in values.yaml, see 04-cloud-config.md
@@ -239,7 +241,7 @@ kubectl port-forward svc/mc-release-mission-control-ui 8443:443 -n mission-contr
 
 ## Path 2 — Helm with Separate Cluster Resources
 
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm-separate-cluster-resources.html
+📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-helm-separate-cluster-resources.html  
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-cluster-level-resources-separately.html
 
 Use when cluster-scoped resources (CRDs, ClusterRoles) must be managed by a different team than the application deployment.
@@ -270,7 +272,7 @@ helm install $MC_RELEASE_NAME \
 
 > ⚠️ **Upgrade order:** Always upgrade `mc-cluster-obj` first, then the main release, using the same flags.
 
-For narrow-scope RBAC so the app team can run `helm upgrade` without cluster-admin:
+For narrow-scope RBAC so the app team can run `helm upgrade` without cluster-admin:  
 📖 https://docs.datastax.com/en/mission-control/administration/mc/helm-upgrade-rbac.html
 
 ---
@@ -295,7 +297,7 @@ for SA in loki mission-control mission-control-agent mission-control-aggregator 
 done
 ```
 
-If your organization requires `restricted-v2` with dynamically assigned UIDs, see `05-security.md` and the OpenShift-specific overrides file referenced there.
+If your organization requires `restricted-v2` with dynamically assigned UIDs, see `05-security.md`.
 
 ### Configure OpenShift DNS (required for Loki/Mimir)
 
@@ -333,16 +335,14 @@ For the required OCP-specific values (DNS resolver, regionDomain, etc.), see `04
 
 ### Verify SCC assignment after install
 ```bash
-oc get pod mc-release-k8ssandra-operator-PODID \
-  -o jsonpath='{.metadata.annotations.openshift\.io/scc}'
-# Should show: nonroot-v2 (or restricted-v2 if you configured that)
+oc get pod -l app.kubernetes.io/name=k8ssandra-operator -n mission-control \
+  -o jsonpath='{.items[0].metadata.annotations.openshift\.io/scc}'
+# Should show: nonroot-v2 (or restricted-v2 if configured)
 ```
-
-📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-openshift.html
 
 ---
 
-## Migrate an existing Replicated installation to ICR
+## Migrate an Existing Replicated Installation to ICR
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/migrate-replicated-to-icr.html
 
@@ -470,6 +470,8 @@ dex:
     repository: icr.io/datastax-mission-control/mission-control-dex
 ```
 
+> ℹ️ In v1.21.0+, `cass-config-builder` is migrated to GitHub Container Registry (`ghcr.io/datastax/cass-config-builder:1.0.22-ubi@sha256:60849108bc9f582714ac955a3594ed39ad39bc5e528ef421d07b1882875aeb97`), and `k8ssandra-client` is tagged `mission-control-1.21.0`.
+
 ### Restart cass-operator (both variants)
 
 ```bash
@@ -497,13 +499,13 @@ All images should reference `icr.io/datastax-mission-control/…` or `cp.icr.io/
 kubectl get pods -n mission-control
 
 # Check MC operator logs for errors
-kubectl logs -n mission-control deploy/mc-release-mission-control-operator --tail=50
+kubectl logs -n mission-control deploy/${MC_RELEASE_NAME}-mission-control-operator --tail=50
 
 # Check CRDs installed
-kubectl get crd | grep datastax
+kubectl get crd | grep -E "datastax|k8ssandra"
 
 # Access CLI (mcctl)
-kubectl exec -it deploy/mc-release-mission-control -n mission-control -- mcctl version
+kubectl exec -it deploy/${MC_RELEASE_NAME}-mission-control -n mission-control -- mcctl version
 ```
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/access-cli.html
@@ -512,7 +514,8 @@ kubectl exec -it deploy/mc-release-mission-control -n mission-control -- mcctl v
 
 ## Next Steps After Installation
 
-- Configure cloud-specific storage and ingress → `04-cloud-config.md`
-- Set up TLS, LDAP, OIDC → `05-security.md`
-- Deploy your first HCD/DSE cluster → `06-cluster-ops.md`
+- Configure cloud-specific storage, ingress, and settings catalog → `04-cloud-config.md`
+- Set up TLS, cert CA expiration, security overrides, LDAP, OIDC → `05-security.md`
+- Deploy your first HCD/DSE cluster, rolling restarts, SSTable upgrades → `06-cluster-ops.md`
 - Multi-region setup → `06-cluster-ops.md`
+- External CQL access via CQL Gateway & CqlConnectivity → `10-cql-access.md`

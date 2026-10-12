@@ -1,6 +1,7 @@
-# 05 — Security: TLS, BYO CA, Multi-Region Certs, LDAP, OIDC, DB Encryption, Authentication
+# 05 — Security: TLS, BYO CA, Multi-Region Certs, LDAP, OIDC, DB Encryption, Cert Expiration, Authentication
 
 📖 Source: https://docs.datastax.com/en/mission-control/secure/mc/tls.html  
+📖 Source: https://docs.datastax.com/en/mission-control/secure/mc/manage-cert-ca-expiration.html  
 📖 Source: https://docs.datastax.com/en/mission-control/secure/mc/ldap-connector.html  
 📖 Source: https://docs.datastax.com/en/mission-control/secure/mc/openid-connector.html  
 📖 Source: https://docs.datastax.com/en/mission-control/install/security-overrides.html  
@@ -11,34 +12,47 @@
 
 ---
 
-## 1. TLS Configuration
+## 1. Platform TLS Configuration
 
 📖 Source: https://docs.datastax.com/en/mission-control/secure/mc/tls.html
 
 ### Default: fully managed TLS (recommended)
 
-MC auto-generates a self-signed root CA and all component leaf certificates using cert-manager.
+MC auto-generates a self-signed root CA and all platform component leaf certificates using cert-manager.
 
 ```yaml
 # Default values.yaml TLS block:
 tls:
   generateCa: true                             # MC creates and manages root CA
   rootCaSecretName: "mission-control-platform-ca"
-  certDuration: 8760h                          # 365 days per leaf cert
-  certRenewBefore: 336h                        # renew 14 days before expiry
+  certDuration: 8760h                          # 365 days — lifetime of certs MC creates
+  certRenewBefore: 336h                        # cert-manager starts renewal 14 days before expiry
 ```
 
-MC creates the following cert-manager resources automatically:
+- `certDuration` / `certRenewBefore` apply only to certificates that MC creates (not to certs you supply).
+- If `generateCa: false`, `rootCaSecretName` must point to an existing CA secret.
+
+> ℹ️ These Helm `tls.*` keys control the **platform** (control/data plane component) certificates. Database-cluster certificate lifetimes are set per cluster with `spec.encryption.internodeEncryption.certs.certTemplate` in the `MissionControlCluster` — see [Section 10](#10-certificate-and-ca-expiration-management).
+
+MC creates the following cert-manager resources automatically (in the `mission-control` namespace):
 1. A `selfSigned` Issuer (`mission-control-platform-self-signed`)
-2. A root CA Certificate (`mission-control-platform-ca-cert`) stored as secret `mission-control-platform-ca`
-3. An Issuer that references the root CA (`mission-control-issuer`)
-4. Leaf certificates for: Dex/UI, Grafana, Loki, Mimir, Vector (mTLS)
+2. A root CA Certificate (`mission-control-platform-ca-cert`, `isCA: true`) stored as secret `mission-control-platform-ca` (type `kubernetes.io/tls`, keys `ca.crt`, `tls.crt`, `tls.key`)
+3. A CA Issuer that references the root CA secret (`mission-control-issuer`)
+4. Leaf certificates signed by `mission-control-issuer`:
+
+| Certificate / secret | Purpose |
+|---|---|
+| `mission-control-dex` → secret `mission-control-dex-tls` | Mounted into `ui` and `dex` pods; encrypts UI traffic and UI→Dex requests. If `ingress.enabled: true`, `dnsNames` also includes `ingress.regionDomain`. The UI does not enable hostname verification on this connection. |
+| `grafana-server-tls` | Grafana ↔ sidecars and direct Grafana connections (adds Grafana hostname when ingress is enabled) |
+| `loki-server-tls`, `mimir-server-tls` | Encrypt traffic between Loki/Mimir components; also mounted into the UI pod for observability queries |
+| `mission-control-s-aggregator` (server), `mission-control-c-aggregator` (client) | Vector mTLS between Vector agents and the control plane aggregator |
+
+> ℹ️ Earlier versions used a `mission-control-ui-cert` certificate for UI access. Current versions use the Dex certificate instead; the UI cert secret is deprecated and will be removed in a future release.
 
 > ℹ️ Because the root CA is self-signed, browsers show a certificate warning when accessing the MC UI — this is expected and normal.
 
-> ℹ️ Since v1.9.0, root CA and internode certs are set to 20-year expiry by default.
-
-📖 Certificate expiry management: https://docs.datastax.com/en/mission-control/secure/mc/manage-cert-ca-expiration.html
+> ℹ️ Since v1.21.0, MC also enables TLS for `kube-state-metrics` and for the Mimir and Loki gossip rings (release-notes security fixes #2808, #2810, #2813).  
+> 📖 Source: https://docs.datastax.com/en/mission-control/release-notes/release-notes.html
 
 ### Bring Your Own CA (BYO CA)
 
@@ -59,7 +73,9 @@ tls:
   rootCaSecretName: "MY_CUSTOM_CA_SECRET"
 ```
 
-MC will use your CA secret to create the `mission-control-issuer` and sign all leaf certificates.
+With `generateCa: false`, the Helm install does **not** create the self-signed issuer or root CA certificate. MC uses your secret to create `mission-control-issuer` and sign all leaf certificates.
+
+> ⚠️ Ensure your CA can sign the leaf certificates that MC needs.
 
 ---
 
@@ -98,20 +114,38 @@ Do this **before** installing MC on the data plane cluster.
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/security-overrides.html
 
-Since MC v1.8.0, the operator **automatically creates** image pull secrets for Helm installs and replicates them to all namespaces. You only need to reference the secret name.
+Required when image pulls need authentication (airgapped environments, private registries). Since MC v1.8.0, the operator **automatically creates** image pull secrets for Helm installs and replicates them to all namespaces. You only need to reference the secret name in your overrides.
 
 ```yaml
-# Global pull secret reference (covers all components)
+# Global pull secret reference (covers all components) — usually all you need
 global:
   imagePullSecrets:
-    - name: MC_PULL_SECRET_NAME
+    - name: PULL_SECRET_NAME
+```
+
+Use component-specific settings only when individual components need different registry settings. The docs page provides full samples for: main MC component (`image.*`, `imageConfigs.registryOverride` + `reaper`/`medusa`/`dataApi`/`yq`/`cqlsh`), observability (`agent`, `aggregator`, `loki`, `mimir` incl. `minio`/`nginx`), operators (`k8ssandra-operator`, `cass-operator` incl. `imageConfig.defaults` for `cassandra`/`dse`/`hcd`), and others (`client`, `crdPatchJob`, `ui`, `dex`, `kube-state-metrics`, `kubernetes-ingress.controller.existingImagePullSecret`). Example of the main component block:
+
+```yaml
+image:
+  registry: REGISTRY_ADDRESS
+  repository: REGISTRY_NAMESPACE/mission-control
+  imagePullSecret: PULL_SECRET_NAME
+imageConfigs:
+  registryOverride: REGISTRY_ADDRESS
 ```
 
 ### Verify pull secret creation
 ```bash
+kubectl get secret PULL_SECRET_NAME -n mission-control
+# Or list only image pull secrets:
 kubectl get secrets -n mission-control --field-selector type=kubernetes.io/dockerconfigjson
-# Should list your pull secret
 ```
+
+### Troubleshoot pull failures
+- Secret exists in the correct namespace; registry credentials are correct.
+- Secret name in `values.yaml` matches the created secret.
+- Network connectivity to the registry.
+- Check events: `kubectl get events -n mission-control`
 
 ---
 
@@ -119,7 +153,9 @@ kubectl get secrets -n mission-control --field-selector type=kubernetes.io/docke
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/security-overrides.html
 
-Override pod security for hardening (least-privilege):
+Override `podSecurityContext` and `securityContext` per component via Helm for least-privilege hardening.
+
+> ℹ️ The docs examples show structure and placement only; use values that match your organization's security policies.
 
 ```yaml
 # values-security.yaml
@@ -132,7 +168,7 @@ dex:
       drop: [ALL]
     readOnlyRootFilesystem: true
 
-agent:
+agent:                     # aggregator: same structure as agent
   securityContext:
     allowPrivilegeEscalation: false
     capabilities:
@@ -144,19 +180,25 @@ agent:
     runAsUser: 1001
     runAsNonRoot: true
 
-aggregator:
-  securityContext:
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop: [ALL]
-    readOnlyRootFilesystem: true
-    runAsNonRoot: true
+loki:
+  sidecar:
+    securityContext:       # same fields as agent.securityContext
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+  loki:
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
   podSecurityContext:
-    fsGroup: 1001
-    runAsUser: 1001
     runAsNonRoot: true
 
-k8ssandra-operator:
+k8ssandra-operator:        # cass-operator: same structure
   podSecurityContext:
     runAsNonRoot: true
   securityContext:
@@ -166,14 +208,14 @@ k8ssandra-operator:
     readOnlyRootFilesystem: true
 ```
 
-Apply after install:
+Apply:
 ```bash
-helm upgrade mc-release oci://icr.io/mission-control-helm/mission-control \
-  --version $MC_VERSION \
-  --namespace mission-control \
-  -f values.yaml \
+helm upgrade mission-control oci://icr.io/mission-control-helm/mission-control \
+  --namespace mission-control --create-namespace \
   -f values-security.yaml
 ```
+
+> ⚠️ On an existing install, also pass your normal `-f values.yaml` (and `--version`) so the upgrade doesn't drop other settings.
 
 ---
 
@@ -276,11 +318,15 @@ dex:
 
 ---
 
-## 7. MissionControlCluster Security Overrides
+## 7. Database Resource Security Overrides (MissionControlCluster, CqlConnectivity, DataApi)
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/security-overrides.html
 
-Override security contexts for database pods in the `MissionControlCluster` CRD:
+Apply these with `kubectl apply -f FILE.yaml`. The docs page has the full samples; key structure below.
+
+### MissionControlCluster
+
+Container `securityContext` per init container / container, plus `podSecurityContext`, under `spec.k8ssandra.cassandra`; the `cqlsh` pod is overridden under `spec.cqlsh.spec`.
 
 ```yaml
 apiVersion: missioncontrol.datastax.com/v1beta2
@@ -291,14 +337,9 @@ metadata:
 spec:
   k8ssandra:
     cassandra:
-      podSecurityContext:
-        fsGroup: 999
-        runAsGroup: 999
-        runAsNonRoot: true
-        runAsUser: 999
-      containers:
-        - name: cassandra
-          securityContext:
+      initContainers:
+        - name: cass-config-builder        # docs also show DSE / HCD / Medusa init containers
+          securityContext: &restricted
             allowPrivilegeEscalation: false
             capabilities:
               drop: [ALL]
@@ -307,14 +348,89 @@ spec:
             runAsGroup: 999
             runAsNonRoot: true
             runAsUser: 999
+      containers:
+        - name: cassandra
+          securityContext: *restricted
         - name: server-system-logger
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: [ALL]
-            readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 999
+          securityContext: *restricted
+      podSecurityContext:
+        fsGroup: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+        runAsUser: 999
+  cqlsh:
+    spec:
+      initContainers: []
+      containers:
+        - name: CONTAINER_NAME
+          securityContext: *restricted
+      securityContext:                     # pod-level for the cqlsh pod
+        fsGroup: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+        runAsUser: 999
+```
+
+> ℹ️ YAML anchors (`&restricted` / `*restricted`) are used here only for brevity; the docs spell each block out in full.
+
+### CqlConnectivity
+
+Overrides go under `spec.loadBalancers.podConfig`:
+
+```yaml
+apiVersion: missioncontrol.datastax.com/v1alpha1
+kind: CqlConnectivity
+metadata:
+  name: CQL_CONNECTIVITY_NAME
+spec:
+  cassandraDatacenterRef:
+    name: DATACENTER_NAME
+  loadBalancers:
+    nativePort: 9042
+    serviceConfig: {}
+    size: 2
+    podConfig:
+      containerSecurityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        privileged: false
+        readOnlyRootFilesystem: true
+        runAsGroup: 999
+        runAsNonRoot: true
+        runAsUser: 999
+      podSecurityContext:
+        fsGroup: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+        runAsUser: 999
+```
+
+### DataApi
+
+Overrides go directly under `spec`:
+
+```yaml
+apiVersion: missioncontrol.datastax.com/v1alpha1
+kind: DataApi
+metadata:
+  name: DATA_API_NAME
+  namespace: NAMESPACE
+spec:
+  cassandraDatacenterRef:
+    name: DATACENTER_NAME
+  replicas: 1
+  services:
+    clusterIP:
+      port: CLUSTER_IP_PORT     # for external access, use services.ingress instead of nodePort
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+    privileged: false
+    readOnlyRootFilesystem: true
+  podSecurityContext:
+    runAsNonRoot: true
 ```
 
 ---
@@ -402,49 +518,164 @@ kubectl exec -it CASSANDRA_POD -n my-project -c cassandra -- \
 
 📖 Source: https://docs.datastax.com/en/mission-control/secure/database/internode-encrypt.html
 
-Three modes of internode encryption are available:
+MC manages and orchestrates internode encryption for DSE, HCD, and Apache Cassandra clusters. For a new cluster MC generates a certificate per node, signs it with the cluster's root CA, then generates each node's keystore and truststore and configures the cluster to use them.
 
 | Mode | Use case |
 |------|---------|
+| MC-provided root CA + self-signing (default) | Production: no extra fields needed in the spec |
+| Alternate cert-manager issuer | Enterprise: Vault, Venafi, ACME/Let's Encrypt, or external issuers |
 | No encryption | Dev/test only |
-| MC-provided CA (default) | Production: MC auto-generates and rotates internode certs |
-| Alternate cert-manager issuer | Enterprise: use Vault, Venafi, ACME/Let's Encrypt, or external issuers |
 
-### Mode 1: MC-managed internode encryption (recommended)
+### Mode 1: MC-provided root CA (default)
 
-```yaml
-spec:
-  createIssuer: true                  # create the MC issuer in the cluster namespace
-  encryption:
-    internodeEncryption:
-      enabled: true
-      certs:
-        createCerts: true             # MC generates and rotates certs automatically
+Nothing to add — a standard `MissionControlCluster` (no `encryption` block) gets internode encryption. Within seconds MC creates the root CA secret, then per-node cert and keystore secrets:
+
+```bash
+kubectl get secrets -n PROJECT_SLUG | grep inode
+# mission-control-test-inode-selfsigned-ca-cert   kubernetes.io/tls  3
+# test-dc1-default-sts-0-inode-cert               kubernetes.io/tls  3
+# test-dc1-default-sts-0-inode-cert-keystore      Opaque             2
+# ... one cert + keystore pair per node
 ```
+
+The `-keystore` secrets are mounted into the HCD/DSE/Cassandra pods, which then start within a few minutes.
 
 ### Mode 2: Alternate cert-manager Issuer (Vault, Venafi, ACME)
 
+Create the issuer with the standard cert-manager API, then reference it:
+
 ```yaml
 spec:
-  createIssuer: false                 # do NOT use MC's built-in issuer
+  createIssuer: false                 # do NOT create MC's built-in issuer
   encryption:
     internodeEncryption:
-      enabled: true
       certs:
-        createCerts: false            # do NOT create certs; use external issuer
-        issuerRef:
-          name: vault-issuer          # name of your cert-manager Issuer or ClusterIssuer
-          kind: ClusterIssuer         # or Issuer (namespace-scoped)
-          group: cert-manager.io
+        certTemplate:
+          issuerRef:
+            name: my-alternate-issuer # your cert-manager Issuer
 ```
 
-> ℹ️ This works with any cert-manager-compatible issuer: HashiCorp Vault (`vault.cert-manager.io`), Venafi, ACME/Let's Encrypt (`acme.cert-manager.io`), or custom external issuers.
+> ℹ️ Works with any cert-manager-supported issuer: HashiCorp Vault, Venafi, ACME (Let's Encrypt), or external issuers. Per-node `-inode-cert` / `-inode-cert-keystore` secrets are created the same way as Mode 1.
 
-Once enabled, all gossip and streaming traffic between Cassandra nodes is encrypted.
+### Mode 3: Disable internode encryption
+
+```yaml
+spec:
+  createIssuer: false
+  encryption:
+    internodeEncryption:
+      enabled: false
+```
 
 ---
 
-## 10. Database Client-to-Node Encryption (TLS for App Connections)
+## 10. Certificate and CA Expiration Management
+
+📖 Source: https://docs.datastax.com/en/mission-control/secure/mc/manage-cert-ca-expiration.html
+
+MC sets default certificate expiration to **20 years** for:
+- Root CA
+- Internode certificates
+- Native protocol ingress certificates
+- Management API certificates
+
+> ⚠️ **Pre-1.9.0 DSE clusters:** before upgrading to MC 1.9.0, complete the 1.9.0 post-upgrade steps to rotate the CA and each node's certificate in a rolling fashion for all existing DSE clusters (retrieve superuser creds, run `dsetool ... tsreload server` in every DSE pod, then a rolling restart via **Bulk Actions → Restart**). These steps still apply to any older DSE cluster being brought forward.  
+> 📖 Source: https://docs.datastax.com/en/mission-control/release-notes/release-notes.html#version-1-9-0
+
+### Configure duration with `certTemplate`
+
+```yaml
+spec:
+  encryption:
+    internodeEncryption:
+      certs:
+        certTemplate:
+          duration: "17520h"    # 2 years (default is 20 years = "175200h")
+          renewBefore: "720h"   # start renewal 30 days before expiration
+          keySize: 4096         # RSA key size
+```
+
+📖 CRD field reference: https://docs.datastax.com/en/mission-control/crd-reference/missioncontrolcluster-v1.9.0.html
+
+Then `kubectl apply -f MISSION_CONTROL_CLUSTER.yaml`.
+
+### Rotation behavior
+
+1. The **keystore** holds only the new certificates, so all outgoing connections use the updated credentials.
+2. During the transition the **truststore** holds both the old and new CAs, so nodes using different certs can still interoperate.
+3. Once all nodes use the new certificates, MC triggers the **rotate internode certificates** bulk action to remove the old CA from truststores and keystores.
+
+### Verify
+
+```bash
+kubectl get secrets -n mission-control
+kubectl get certificate -n mission-control          # READY should be True
+kubectl get issuer -n mission-control               # READY should be True
+kubectl get certificaterequest -n mission-control
+```
+
+### Recover from certificate expiration
+
+When certificates expire, components cannot establish secure communication and the cluster is unavailable.
+
+> ⚠️ This procedure causes downtime. Use it only when the cluster cannot recover/restart because certificates have already expired.
+
+1. Stop the datacenter — set `stopped: true` and apply:
+   ```yaml
+   apiVersion: missioncontrol.datastax.com/v1
+   kind: MissionControlCluster
+   metadata:
+     name: CLUSTER_NAME
+     namespace: PROJECT_SLUG
+   spec:
+     k8ssandra:
+       cassandra:
+         datacenters:
+           - name: DATACENTER_NAME
+             stopped: true
+   ```
+   ```bash
+   kubectl apply -f MISSION_CONTROL_CLUSTER.yaml
+   kubectl get pods -n PROJECT_SLUG | grep DATACENTER_NAME   # confirm pods are gone
+   ```
+2. Delete the cluster's certificate secrets (repeat the `-inode` / `-inode-ks` pair for every `RACK_NAME`-`NODE_INDEX`):
+   ```bash
+   C=CLUSTER_NAME; DC=DATACENTER_NAME
+   kubectl delete secret -n PROJECT_SLUG \
+     $C-$DC-internode-client-cert \
+     $C-$DC-internode-server-cert \
+     $C-$DC-c-mgmt \
+     $C-$DC-c-mgmt-ks \
+     $C-$DC-s-mgmt \
+     $C-$DC-s-mgmt-ks \
+     $C-$DC-RACK_NAME-NODE_INDEX-inode \
+     $C-$DC-RACK_NAME-NODE_INDEX-inode-ks \
+     $C-$DC-client-cert \
+     $C-$DC-management-api-cert \
+     $C-$DC-cql-router-cert \
+     $C-$DC-cql-router-client-cert \
+     $C-$DC-cql-router-server-cert \
+     $C-$DC-cql-router-management-api-cert \
+     $C-$DC-cql-router-client-management-api-cert \
+     $C-$DC-cql-router-server-management-api-cert
+   ```
+3. Verify with `kubectl get secrets -n PROJECT_SLUG` and delete any remaining secrets related to the expired certificates: `kubectl delete secret SECRET_NAME -n PROJECT_SLUG`.
+4. Delete the `Certificate` resource and verify:
+   ```bash
+   kubectl delete certificate -n PROJECT_SLUG cluster-certificate
+   kubectl get certificate -n PROJECT_SLUG
+   ```
+5. Restart — set `stopped: false` in the `MissionControlCluster` and `kubectl apply -f MISSION_CONTROL_CLUSTER.yaml`. This triggers reconciliation and creates new certificates.
+6. Verify:
+   ```bash
+   kubectl get secrets -n PROJECT_SLUG               # new certificate secrets exist
+   kubectl describe secret -n PROJECT_SLUG           # secrets re-created
+   kubectl get pods -n PROJECT_SLUG | grep DATACENTER_NAME   # datacenter running
+   ```
+
+---
+
+## 11. Database Client-to-Node Encryption (TLS for App Connections)
 
 📖 Source: https://docs.datastax.com/en/mission-control/secure/database/client-to-node-encrypt.html
 
@@ -499,84 +730,72 @@ kubectl exec -it CASSANDRA_POD -n my-project -c cassandra -- \
 
 ---
 
-## 11. Transparent Data Encryption — TDE (DSE Only)
+## 12. Transparent Data Encryption — TDE (DSE Only)
 
 📖 Source: https://docs.datastax.com/en/mission-control/secure/database/transparent-data-encrypt.html
 
-> ⚠️ TDE is available **only for DSE** clusters. It is **not** available for Cassandra or HCD.
+> ⚠️ MC supports the TDE feature of **DSE**. Apache Cassandra does not have this feature.
 
-TDE encrypts data at rest at the SSTable level. Every table that needs encryption must use `EncryptingLZ4Compressor`.
-
-**Step 1: Generate the system encryption key**
+**Step 1: Generate the encryption/decryption key file**
 
 ```bash
-# Run this inside a DSE pod to generate the key
-kubectl exec -it DSE_POD -n my-project -c cassandra -- \
-  dsetool createsystemkey 'AES/ECB/PKCS5Padding' 128 tde.key
+dsetool createsystemkey 'AES/ECB/PKCS5Padding' 128 tde.key -d .
 ```
 
-**Step 2: Retrieve and store the key as a Kubernetes Secret**
+**Step 2: Store the key file in a secret in the cluster's namespace**
 
 ```bash
-# Copy the generated key from the pod
-kubectl cp my-project/DSE_POD:/etc/dse/conf/tde.key ./tde.key
-
-# Create a Kubernetes secret from the key file
-kubectl create secret generic dse-tde-key \
-  --namespace my-project \
-  --from-file=tde.key=./tde.key
+kubectl create secret generic tde-secret \
+  --from-file=tde.key=/path/to/tde.key \
+  -n NAMESPACE
 ```
 
-**Step 3: Mount the key and configure DSE in MissionControlCluster**
+**Step 3: Add the volume, mount it into the `cassandra` container, and configure `dse.yaml`**
 
 ```yaml
+apiVersion: missioncontrol.datastax.com/v1beta2
+kind: MissionControlCluster
+metadata:
+  name: test
+  namespace: NAMESPACE
 spec:
+  createIssuer: true
   k8ssandra:
     cassandra:
-      # Mount the key file into the DSE container
+      serverType: dse
+      serverVersion: 6.8.36
+      # ... storageConfig, datacenters, etc.
       extraVolumes:
-        - name: tde-key-vol
-          secret:
-            secretName: dse-tde-key
+        volumes:
+          - name: tde-key
+            secret:
+              secretName: tde-secret
       containers:
-        - name: cassandra
+        - name: "cassandra"
           volumeMounts:
-            - name: tde-key-vol
-              mountPath: /etc/dse/conf/system_keys
-              readOnly: true
+            - name: tde-key
+              mountPath: /var/tde
       config:
         dseYaml:
-          # Tell DSE where to find the system key
-          system_key_directory: /etc/dse/conf/system_keys
+          system_key_directory: /var/tde
           config_encryption_key_name: tde.key
-          # Enable encryption at rest
-          encryption_options:
-            enabled: true
-            cipher_algorithm: AES
-            secret_key_strength: 128
-            key_name: tde.key
 ```
 
 **Step 4: Create encrypted tables**
 
 ```sql
--- Tables must use EncryptingLZ4Compressor to be encrypted at rest
-CREATE TABLE my_keyspace.my_encrypted_table (
-  id UUID PRIMARY KEY,
-  data TEXT
-) WITH compression = {
-  'class': 'com.datastax.bdp.cassandra.crypto.EncryptingLZ4Compressor',
-  'cipher_algorithm': 'AES',
+CREATE TABLE test.encryption_test (id int PRIMARY KEY, val text) WITH COMPRESSION = {
+  'class': 'EncryptingLZ4Compressor',
+  'cipher_algorithm': 'AES/ECB/PKCS5Padding',
   'secret_key_strength': 128,
-  'chunk_length_in_kb': 64
-};
+  'system_key_file': 'tde.key' };
 ```
 
-> ℹ️ Existing tables must be altered to use `EncryptingLZ4Compressor` and then `nodetool upgradesstables` must be run on each node to re-compress existing data with encryption.
+Read and write the table with normal CQL (`INSERT` / `SELECT`).
 
 ---
 
-## 12. OpenShift SCC Management
+## 13. OpenShift SCC Management
 
 📖 Source: https://docs.datastax.com/en/mission-control/install/install-mc-openshift.html
 
@@ -601,7 +820,7 @@ done
 
 ---
 
-## 13. Helm Upgrade RBAC (narrow-scope, no cluster-admin required)
+## 14. Helm Upgrade RBAC (narrow-scope, no cluster-admin required)
 
 📖 Source: https://docs.datastax.com/en/mission-control/administration/mc/helm-upgrade-rbac.html
 
@@ -612,6 +831,7 @@ For organizations where app teams should be able to run `helm upgrade` without b
 ## See also
 
 - Certificate and CA expiration management: https://docs.datastax.com/en/mission-control/secure/mc/manage-cert-ca-expiration.html
+- Override default security settings: https://docs.datastax.com/en/mission-control/install/security-overrides.html
 - Securing overview: https://docs.datastax.com/en/mission-control/secure/mc/securing.html
 - Platform components reference: https://docs.datastax.com/en/mission-control/reference/platform-components.html
 - CRD reference: https://docs.datastax.com/en/mission-control/crd-reference/crd-reference-overview.html

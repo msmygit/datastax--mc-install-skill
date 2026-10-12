@@ -33,7 +33,7 @@ PRE-FLIGHT
 INSTALLATION
   [ ] overrides.yaml configures Loki storage (or disables it) and Dex with an auth connector — bare install fails validation
   [ ] Data plane Vector aggregator URL is set and reachable from DP before install
-  [ ] For OpenShift: SCC grants applied to all 9 service accounts BEFORE helm install
+  [ ] For OpenShift: SCC grants applied to all 9 service accounts BEFORE helm install (see 02-install-online.md)
   [ ] For OpenShift: dnsNamespace: openshift-dns + Mimir nginx resolver set (silent failure without it)
   [ ] For multi-region: Vector client TLS cert replicated to data plane BEFORE registering DP
   [ ] Medusa bucket secret created in cluster namespace BEFORE MissionControlCluster applied
@@ -139,7 +139,7 @@ kubectl top node
 | Rancher webhook failures | NGINX 1MB body size limit | Add `nginx.ingress.kubernetes.io/proxy-body-size: "0"` annotation to Ingress |
 | cert-manager secret not cleaned up (OCP) | OCP cert-manager Operator doesn't auto-delete secrets | Manually `oc delete secret SECRET_NAME -n NAMESPACE` after removing Certificate |
 | Multi-region: data plane can't reach CP aggregator | mTLS Vector cert not replicated | Copy CP Vector client cert secret to DP namespace (see `05-security.md`) |
-| K8s 1.35.x StatefulSet failures | `MaxUnavailableStatefulSet` feature flag bug | Avoid K8s 1.35.0–1.35.3; upgrade to 1.35.4+ or disable the flag |
+| K8s 1.35.0–1.35.3 StatefulSet failures | `MaxUnavailableStatefulSet` feature flag bug; K8s 1.35.4 validated in MC 1.21.0 | Upgrade to K8s 1.35.4 or later, or disable the `MaxUnavailableStatefulSet` feature flag on kubelet |
 | Helm 3.19+ fails | Not yet supported | Downgrade to Helm 3.18.x |
 | Air-gap: image pull errors | Image not mirrored to private registry, or wrong tag | Verify all required images are in registry; check tags match release notes |
 | OCP: pods remain after `helm uninstall` | SCC grants not removed first | Remove SCC grants before uninstalling (see Section 7 below) |
@@ -148,6 +148,8 @@ kubectl top node
 | `NotEnoughSpaceToScaleDown` on DC scale-down | Remaining nodes lack disk for decommissioned data | Add more storage or reduce to fewer nodes in stages |
 | Scale-up/down fails or is rejected | Size not a multiple of rack count | Always change size in multiples of rack count (e.g., 3, 6, 9 for a 3-rack DC) |
 | MC blocks DC deletion | User keyspaces still reference the DC | `ALTER KEYSPACE` to remove the DC from replication first |
+| DC termination fails with `cannot decommission DC dc1: keyspace ks1 still has replicas on it` | User-defined keyspace still replicates to the DC targeted for termination | Run `ALTER KEYSPACE ks1 WITH replication = {'class': 'NetworkTopologyStrategy', 'remaining-dc': 3};` to remove all references — terminate one DC at a time — see `06-cluster-ops.md` |
+| Expired certificates — nodes fail to reconnect after cert rotation | Platform or cluster certificates have expired | Follow the expired-certificate recovery runbook in `05-security.md`; default cert lifetime is 20 years (configurable via `certTemplate.duration`) |
 | No metrics above 40 nodes | Default Mimir rate limits too low | Raise `ingestion_rate` to 250000, `ingestion_burst_size` to 500000 — see `08-observability.md` |
 | Grafana/metrics timeout at 45+ nodes | Vector not compressing; buffer overflow | Enable `compression: true` + `buffer.max_size: 2147483648` in Vector config — see `08-observability.md` |
 
@@ -156,6 +158,7 @@ kubectl top node
 ## 4. Control Plane Outage: Emergency Operations
 
 📖 Source: https://docs.datastax.com/en/mission-control/administration/interact-with-local-operators-during-failure.html
+📖 CRD reference: https://docs.datastax.com/en/mission-control/crd-reference/crd-reference-overview.html
 
 If the Mission Control control plane goes down, **your database clusters continue running**. `cass-operator` on the data plane keeps the StatefulSets healthy. Here's what you can and cannot do:
 
@@ -234,27 +237,72 @@ kubectl annotate CassandraDatacenter dc1 -n my-project \
 
 Attach this bundle to every IBM Support ticket.
 
-### Online (internet access available)
+### Method 1: kubectl support-bundle plugin
+
+#### Install the plugin (one-time)
+
 ```bash
-# Install the support-bundle kubectl plugin first (if not installed):
-curl https://krew.sh | bash
-kubectl krew install support-bundle
+# Option A — Homebrew
+brew tap replicatedhq/replicated
+brew install support-bundle
 
-# Generate bundle (includes MC-specific checks when MC is installed)
-kubectl support-bundle https://kots.io
+# Option B — download binary directly from:
+# https://github.com/replicatedhq/troubleshoot/releases
+```
 
-# Generates: support-bundle-TIMESTAMP.tar.gz
+#### Online clusters
+
+```bash
+# Run against the spec file (download kots-support-bundle-spec.yaml first)
+kubectl support-bundle LOCATION/kots-support-bundle-spec.yaml
+
+# Generates: support-bundle-YYYY-MM-DDThh_mm_ss.tar.gz in the current directory
 # Submit to: https://www.ibm.com/mysupport
 ```
 
-### Air-gapped (no internet)
-```bash
-# On an internet-connected machine: download the spec
-curl -o support-bundle-spec.yaml https://kots.io
+#### Air-gapped clusters
 
-# Copy support-bundle-spec.yaml to the air-gapped server, then:
-kubectl support-bundle ./support-bundle-spec.yaml
+```bash
+# Step 1 (internet side): download the default support bundle spec from the docs
+# https://docs.datastax.com/en/mission-control/misc/generating-support-bundle.html
+
+# Step 2 (air-gap side): copy the kots-support-bundle-spec.yaml to the server, then:
+kubectl support-bundle LOCATION/kots-support-bundle-spec.yaml
 ```
+
+### Method 2: DataStax diagnostic collector (ds-collector)
+
+📖 Source: https://github.com/datastax/diagnostic-collection
+
+The open-source diagnostic collector gathers node-level information from every Cassandra/HCD pod.
+
+```bash
+# Download the latest release from:
+# https://github.com/datastax/diagnostic-collection/releases
+
+cd ds-collector
+
+# Set your cluster name
+export CLUSTER_NAME="my-cluster"
+
+# Find the target pod
+kubectl get pods -A | grep -i cassandra
+kubectl get pod POD_NAME -n POD_NAMESPACE -o wide
+
+# Configure for Kubernetes mode
+cp collector.conf.in collector.conf
+sed -i.bak 's/#use_k8s="true"/use_k8s="true"/' collector.conf
+sed -i.bak 's/#k8s_namespace="default"/k8s_namespace="POD_NAMESPACE"/' collector.conf
+sed -i.bak 's/#skipSudo="true"/skipSudo="true"/' collector.conf
+
+# Verify configuration (dry-run)
+./ds-collector -T -f collector.conf -n POD_NAME
+
+# Generate the bundle (saved to /tmp/datastax by default)
+./ds-collector -X -f collector.conf -n POD_NAME
+```
+
+> ⚠️ The pod must be in `Running` status for the diagnostic collector to work.
 
 ### What the bundle includes
 - Pod logs for all MC components
@@ -310,42 +358,49 @@ See `08-observability.md` → Section 5 (Enterprise Scale) for Vector compressio
 ### Helm uninstall
 
 ```bash
-# Uninstall the Helm release
-helm uninstall mc-release -n mission-control
+# 1. Uninstall the Helm release (replace NAMESPACE; default is mission-control)
+helm uninstall mission-control -n NAMESPACE
 
-# Remove remaining PVCs
-kubectl delete pvc --all -n mission-control
+# 2. Verify remaining pods
+kubectl get pods -n NAMESPACE
 
-# Delete cluster namespaces (if you deployed global-scoped clusters)
-kubectl delete namespace my-project
+# 3. Delete the MC namespace
+kubectl delete namespace NAMESPACE
 
-# Delete the MC namespace
-kubectl delete namespace mission-control
+# 4. Delete cluster namespaces (only if you deployed global-scoped clusters)
+kubectl delete namespace CLUSTER_NAMESPACE
 
-# Remove the clusterconfigs CRD
+# 5. Remove the clusterconfigs CRD
 kubectl delete crd clusterconfigs.datastax.com
 
-# If installed with separate cluster resources, also remove those:
-kubectl delete -f mission-control-cluster-resources.yaml --namespace mission-control
+# 6. If installed with separate cluster resources, also remove those:
+kubectl delete -f MISSION_CONTROL_CLUSTER_RESOURCES_FILE.yaml --namespace NAMESPACE
+
+# 7. Remove any remaining PVCs
+kubectl delete pvc --all -n NAMESPACE
 ```
 
 > If this cluster still has a leftover KOTS admin console from a pre-migration Replicated install that was never cleaned up, remove it directly with `kubectl` (not `kubectl kots remove`) — see the "Remove KOTS" step in `02-install-online.md`'s migration section.
 
 ### OpenShift: REMOVE SCC GRANTS FIRST (critical)
 
-> ⚠️ If you skip this step, resources will hang during uninstall.
+> ⚠️ **OpenShift only.** Remove the SCC grants **before** running `helm uninstall`; skipping this step causes resources to hang. The uninstall page lists 8 service accounts; the install page grants 9 (it also includes `mission-control-mimir`), so remove that grant too if you added it.
 
 ```bash
-# Remove SCC grants BEFORE helm uninstall
-for SA in loki mission-control mission-control-agent mission-control-aggregator \
-  mission-control-cass-operator mission-control-dex \
-  mission-control-k8ssandra-operator mission-control-kube-state-metrics; do
-  oc adm policy remove-scc-from-user nonroot-v2 -z $SA -n mission-control
-done
+# Remove SCC grants BEFORE helm uninstall (run without -n; SCC is cluster-scoped)
+oc adm policy remove-scc-from-user nonroot-v2 -z loki
+oc adm policy remove-scc-from-user nonroot-v2 -z mission-control
+oc adm policy remove-scc-from-user nonroot-v2 -z mission-control-agent
+oc adm policy remove-scc-from-user nonroot-v2 -z mission-control-aggregator
+oc adm policy remove-scc-from-user nonroot-v2 -z mission-control-cass-operator
+oc adm policy remove-scc-from-user nonroot-v2 -z mission-control-dex
+oc adm policy remove-scc-from-user nonroot-v2 -z mission-control-k8ssandra-operator
+oc adm policy remove-scc-from-user nonroot-v2 -z mission-control-kube-state-metrics
+oc adm policy remove-scc-from-user nonroot-v2 -z mission-control-mimir   # granted at install; not listed on the uninstall page
 
 # Then proceed with Helm uninstall
-helm uninstall mc-release -n mission-control
-oc delete namespace mission-control
+helm uninstall mission-control -n mission-control
+kubectl delete namespace mission-control
 ```
 
 ---
